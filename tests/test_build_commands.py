@@ -1,10 +1,23 @@
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 import build
+
+
+def test_cli_exposes_strict_wx_as_an_explicit_opt_in() -> None:
+    result = subprocess.run(
+        [sys.executable, str(Path(build.__file__)), "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "--strict-wx" in result.stdout
+    assert "non-RWX" in result.stdout
 
 
 def test_run_passes_argument_vector_without_shell(

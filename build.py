@@ -770,6 +770,20 @@ def apply_targeted_patches(frida_dir: Path, custom_name: str, frida_major: int):
     log("Targeted patches complete", "OK")
 
 
+def apply_strict_wx_patch(frida_dir: Path) -> None:
+    """Use Gum's existing non-RWX allocator path on Android."""
+    relative_path = Path("subprojects/frida-gum/gum/gummemory.c")
+    target = frida_dir / relative_path
+    old = "#if defined (HAVE_DARWIN) && !defined (HAVE_I386)"
+    new = "#if (defined (HAVE_DARWIN) && !defined (HAVE_I386)) || defined (HAVE_ANDROID)"
+    count = replace_in_file(target, old, new)
+    if count != 1:
+        raise BuildError(
+            f"Strict W^X pattern occurred {count} times in {relative_path.as_posix()}; expected 1"
+        )
+    log(f"  [required] {relative_path.as_posix()}: Android RWX disabled", "OK")
+
+
 def apply_port_patches(frida_dir: Path, port: int | None) -> None:
     """Apply only the configured listening-port replacement."""
     if port is not None and port != 27042:
@@ -1373,6 +1387,11 @@ Transformations and verification boundaries:
         help="Apply stability fixes (perfetto skip, cloak detach)",
     )
     parser.add_argument(
+        "--strict-wx",
+        action="store_true",
+        help="Use Gum's existing non-RWX allocator path on Android",
+    )
+    parser.add_argument(
         "--work-dir", "-w", default=None, help="Working directory (default: ./build)"
     )
     parser.add_argument(
@@ -1417,6 +1436,7 @@ Transformations and verification boundaries:
     log(f"  Archs:    {', '.join(archs)}", "INFO")
     log(f"  Port:     {port or '27042 (default)'}", "INFO")
     log(f"  Extended: {args.extended}", "INFO")
+    log(f"  Strict W^X: {args.strict_wx}", "INFO")
     log(f"  Work dir: {work_dir}", "INFO")
     log(f"  Output:   {output_dir}", "INFO")
 
@@ -1442,6 +1462,8 @@ Transformations and verification boundaries:
     # Step 3: Source patches
     apply_source_patches(frida_dir, custom_name)
     apply_targeted_patches(frida_dir, custom_name, frida_major)
+    if args.strict_wx:
+        apply_strict_wx_patch(frida_dir)
 
     # Step 3.5: Extended patches
     if args.extended:

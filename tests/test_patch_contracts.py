@@ -225,6 +225,42 @@ def test_targeted_patch_uses_non_counted_art_jit_memfd_name(tmp_path: Path) -> N
     assert '"jit-cache"' not in patched
 
 
+def test_strict_wx_patch_uses_gums_existing_non_rwx_path_on_android(tmp_path: Path) -> None:
+    root = make_core_fixture(tmp_path)
+    memory = root / "subprojects/frida-gum/gum/gummemory.c"
+    memory.parent.mkdir(parents=True, exist_ok=True)
+    memory.write_text(
+        """GumRwxSupport
+gum_query_rwx_support (void)
+{
+#if defined (HAVE_DARWIN) && !defined (HAVE_I386)
+  return GUM_RWX_NONE;
+#else
+  return GUM_RWX_FULL;
+#endif
+}
+""",
+        encoding="utf-8",
+    )
+
+    build.apply_strict_wx_patch(root)
+
+    patched = memory.read_text(encoding="utf-8")
+    assert "defined (HAVE_ANDROID)" in patched
+    assert "return GUM_RWX_NONE;" in patched
+    assert "return GUM_RWX_FULL;" in patched
+
+
+def test_strict_wx_patch_rejects_upstream_source_drift(tmp_path: Path) -> None:
+    root = make_core_fixture(tmp_path)
+    memory = root / "subprojects/frida-gum/gum/gummemory.c"
+    memory.parent.mkdir(parents=True, exist_ok=True)
+    memory.write_text("GumRwxSupport changed_upstream (void)\n", encoding="utf-8")
+
+    with pytest.raises(build.BuildError, match="Strict W\\^X pattern occurred 0 times"):
+        build.apply_strict_wx_patch(root)
+
+
 def test_zymbiote_artifacts_patch_the_fixed_socket_field(tmp_path: Path) -> None:
     root = make_core_fixture(tmp_path)
     old_socket = b"/frida-zymbiote-" + (b"0" * 32)
