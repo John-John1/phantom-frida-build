@@ -126,6 +126,13 @@ def require_single_device(adb_output: str) -> str:
     return devices[0]
 
 
+def assert_interactive_device(power_state: str, window_policy: str) -> None:
+    if "mWakefulness=Awake" not in power_state:
+        raise SmokeFailure("Android device must be awake before spawn acceptance")
+    if "mInputRestricted=true" in window_policy:
+        raise SmokeFailure("Android device must be unlocked before spawn acceptance")
+
+
 def server_start_command(serial: str, remote_server: str, endpoint: RemoteEndpoint) -> list[str]:
     remote_log = f"{REMOTE_DIR}/server.log"
     return [
@@ -660,6 +667,10 @@ def run_android_smoke(config: AndroidSmokeConfig, script_path: Path) -> dict[str
     root_result = root_shell(serial, "id")
     if "uid=0" not in root_result.stdout:
         raise SmokeFailure(f"adb device does not provide root through su: {root_result.stdout}")
+    assert_interactive_device(
+        adb(serial, "shell", "dumpsys", "power").stdout,
+        adb(serial, "shell", "dumpsys", "window", "policy").stdout,
+    )
     package_result = adb(serial, "shell", "pm", "path", config.package)
     if "package:" not in package_result.stdout:
         raise SmokeFailure(f"Android package is not installed: {config.package}")

@@ -131,6 +131,27 @@ def test_require_single_device_returns_only_authorized_serial() -> None:
     assert android_smoke.require_single_device(output) == "SERIAL-1"
 
 
+def test_interactive_device_preflight_accepts_unlocked_screen() -> None:
+    android_smoke.assert_interactive_device(
+        "mWakefulness=Awake\n",
+        "mInputRestricted=false\n",
+    )
+
+
+@pytest.mark.parametrize(
+    ("power", "policy", "reason"),
+    [
+        ("mWakefulness=Dozing\n", "mInputRestricted=false\n", "awake"),
+        ("mWakefulness=Awake\n", "mInputRestricted=true\n", "unlocked"),
+    ],
+)
+def test_interactive_device_preflight_rejects_blocked_spawn_state(
+    power: str, policy: str, reason: str
+) -> None:
+    with pytest.raises(android_smoke.SmokeFailure, match=reason):
+        android_smoke.assert_interactive_device(power, policy)
+
+
 @pytest.mark.parametrize(
     "output,count",
     [
