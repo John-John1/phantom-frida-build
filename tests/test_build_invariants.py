@@ -92,6 +92,22 @@ def test_binary_memory_patches_only_touch_runtime_alloc_sections(tmp_path: Path)
     assert len(patched) == len(make_elf64_with_alloc_and_debug_sections(markers, markers))
 
 
+def test_binary_replacement_does_not_cross_protected_region_boundary() -> None:
+    data = b"prefix-frida-suffix"
+    marker_start = data.index(b"frida")
+
+    patched, count = build.replace_bytes_in_regions(
+        data,
+        b"frida",
+        b"libgc",
+        [(0, len(data))],
+        [(marker_start + 2, marker_start + 4)],
+    )
+
+    assert patched == data
+    assert count == 0
+
+
 def test_collect_artifacts_requires_server_and_gadget(tmp_path: Path) -> None:
     with pytest.raises(build.BuildError, match="Server artifact"):
         build.collect_artifacts(
@@ -163,6 +179,14 @@ def test_strip_binary_uses_llvm_strip(tmp_path: Path, monkeypatch: pytest.Monkey
     build.strip_binary(binary, strip_tool)
 
     assert commands == [[strip_tool, "--strip-unneeded", binary]]
+
+
+def test_find_llvm_strip_accepts_linux_ndk_tool(tmp_path: Path) -> None:
+    strip_tool = tmp_path / "toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+    strip_tool.parent.mkdir(parents=True)
+    strip_tool.write_bytes(b"")
+
+    assert build.find_llvm_strip(tmp_path) == strip_tool
 
 
 def test_collect_artifacts_strips_only_staged_gadget_before_compression(

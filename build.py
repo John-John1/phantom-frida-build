@@ -978,7 +978,7 @@ def replace_bytes_in_regions(
             break
         end = position + len(old)
         included = any(start <= position and end <= stop for start, stop in include_regions)
-        protected = any(start <= position < stop for start, stop in skip_regions)
+        protected = any(position < stop and end > start for start, stop in skip_regions)
         if included and not protected:
             result[position:end] = new
             count += 1
