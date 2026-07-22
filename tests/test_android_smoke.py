@@ -25,6 +25,20 @@ def test_proc_scan_accepts_custom_runtime_names() -> None:
     )
 
 
+def test_proc_scan_rejects_legacy_linjector_fd() -> None:
+    with pytest.raises(android_smoke.SmokeFailure, match="linjector"):
+        android_smoke.assert_clean_proc_text("fds", "pipe:[linjector-123]")
+
+
+def test_proc_scan_rejects_active_tracer() -> None:
+    with pytest.raises(android_smoke.SmokeFailure, match="TracerPid"):
+        android_smoke.assert_clean_proc_text("status", "Name:\ttarget\nTracerPid:\t123\n")
+
+
+def test_proc_scan_accepts_no_tracer() -> None:
+    android_smoke.assert_clean_proc_text("status", "Name:\ttarget\nTracerPid:\t0\n")
+
+
 @pytest.mark.parametrize(
     "marker",
     [
@@ -61,13 +75,14 @@ def test_proc_scan_uses_portable_single_commands(monkeypatch: pytest.MonkeyPatch
         "memfd:jit-code-cache",
     )
 
-    assert commands[:4] == [
+    assert commands[:5] == [
         "cat /proc/net/unix",
         "cat /proc/123/maps",
         "ls -l /proc/123/fd",
+        "cat /proc/123/status",
         "cat /proc/123/task/*/comm",
     ]
-    assert commands[4].startswith(
+    assert commands[5].startswith(
         "/data/local/tmp/phantom-frida-test/proc-memory-scanner 123 memfd:jit-code-cache"
     )
     assert report == {"ranges": 7, "executable": 3}

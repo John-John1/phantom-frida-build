@@ -109,10 +109,14 @@ def assert_clean_proc_text(label: str, text: str) -> None:
             "pool-frida",
             "pool-spawner",
         )
+    elif label == "fds":
+        forbidden += ("linjector",)
     lowered = text.lower()
     matches = [marker for marker in forbidden if marker in lowered]
     if matches:
         raise SmokeFailure(f"{label} contains forbidden marker(s): {', '.join(matches)}")
+    if label == "status" and re.search(r"^TracerPid:\s*[1-9]\d*$", text, re.MULTILINE):
+        raise SmokeFailure("status contains an active TracerPid")
 
 
 def require_single_device(adb_output: str) -> str:
@@ -426,6 +430,7 @@ def _scan_process_procfs(
         "unix": "cat /proc/net/unix",
         "maps": f"cat /proc/{pid}/maps",
         "fds": f"ls -l /proc/{pid}/fd",
+        "status": f"cat /proc/{pid}/status",
         "threads": f"cat /proc/{pid}/task/*/comm",
     }
     for label, command in commands.items():
