@@ -143,6 +143,7 @@ def test_interactive_device_preflight_accepts_unlocked_screen() -> None:
     [
         ("mWakefulness=Dozing\n", "mInputRestricted=false\n", "awake"),
         ("mWakefulness=Awake\n", "mInputRestricted=true\n", "unlocked"),
+        ("mWakefulness=Awake\n", "KeyguardServiceDelegate\n", "unlocked"),
     ],
 )
 def test_interactive_device_preflight_rejects_blocked_spawn_state(
@@ -500,16 +501,112 @@ def test_report_writer_omits_device_serial(tmp_path: Path) -> None:
     assert "device_serial" not in report
 
 
+def test_adb_redacts_serial_from_command_and_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    serial = "SECRET-SERIAL"
+
+    def fail_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr=f"adb: device '{serial}' not found",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fail_run)
+
+    with pytest.raises(android_smoke.SmokeFailure) as failure:
+        android_smoke.adb(serial, "shell", "id")
+
+    rendered = capsys.readouterr().out + str(failure.value)
+    assert serial not in rendered
+    assert "<redacted>" in rendered
+
+
 def test_cleanup_removes_remote_test_directory(monkeypatch: pytest.MonkeyPatch) -> None:
     root_commands: list[str] = []
-    monkeypatch.setattr(
-        android_smoke,
-        "root_shell",
-        lambda _serial, command, **_kwargs: root_commands.append(command),
-    )
-    monkeypatch.setattr(android_smoke, "adb", lambda *_args, **_kwargs: None)
+    adb_commands: list[tuple[str, ...]] = []
+
+    def fake_root_shell(_serial: str, command: str, **_kwargs: object) -> SimpleNamespace:
+        root_commands.append(command)
+        return SimpleNamespace(
+            returncode=1 if command.startswith(("pkill", "pgrep")) else 0,
+            stdout="",
+            stderr="",
+        )
+
+    def fake_adb(_serial: str, *arguments: str, **_kwargs: object) -> SimpleNamespace:
+        adb_commands.append(arguments)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(android_smoke, "root_shell", fake_root_shell)
+    monkeypatch.setattr(android_smoke, "adb", fake_adb)
     config = SimpleNamespace(name="oemcodec", port=27142)
 
     android_smoke._cleanup(config, "SERIAL-1")
 
-    assert root_commands[-1] == "rm -rf -- /data/local/tmp/phantom-frida-test"
+    assert "rm -rf -- /data/local/tmp/phantom-frida-test" in root_commands
+    assert ("forward", "--list") in adb_commands
+
+
+def test_cleanup_attempts_every_step_and_reports_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_commands: list[str] = []
+    adb_commands: list[tuple[str, ...]] = []
+
+    def fake_root_shell(_serial: str, command: str, **_kwargs: object) -> SimpleNamespace:
+        root_commands.append(command)
+        if command.startswith("rm -rf"):
+            return SimpleNamespace(returncode=1, stdout="", stderr="permission denied")
+        return SimpleNamespace(
+            returncode=1 if command.startswith(("pkill", "pgrep")) else 0,
+            stdout="",
+            stderr="",
+        )
+
+    def fake_adb(_serial: str, *arguments: str, **_kwargs: object) -> SimpleNamespace:
+        adb_commands.append(arguments)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(android_smoke, "root_shell", fake_root_shell)
+    monkeypatch.setattr(android_smoke, "adb", fake_adb)
+    config = SimpleNamespace(name="oemcodec", port=27142)
+
+    with pytest.raises(android_smoke.SmokeFailure, match="remove remote test directory"):
+        android_smoke._cleanup(config, "SERIAL-1")
+
+    assert len([command for command in root_commands if command.startswith("pkill")]) == 2
+    assert len([command for command in root_commands if command.startswith("pgrep")]) == 2
+    assert ("forward", "--remove", "tcp:27142") in adb_commands
+    assert ("forward", "--remove", "tcp:27143") in adb_commands
+    assert ("forward", "--list") in adb_commands
+
+
+def test_cleanup_rejects_lingering_forward(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_root_shell(_serial: str, command: str, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            returncode=1 if command.startswith(("pkill", "pgrep")) else 0,
+            stdout="",
+            stderr="",
+        )
+
+    def fake_adb(_serial: str, *arguments: str, **_kwargs: object) -> SimpleNamespace:
+        stdout = (
+            "SERIAL-1 tcp:27142 localabstract:oemcodec-server\n"
+            if arguments
+            == (
+                "forward",
+                "--list",
+            )
+            else ""
+        )
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(android_smoke, "root_shell", fake_root_shell)
+    monkeypatch.setattr(android_smoke, "adb", fake_adb)
+    config = SimpleNamespace(name="oemcodec", port=27142)
+
+    with pytest.raises(android_smoke.SmokeFailure, match="forward remains"):
+        android_smoke._cleanup(config, "SERIAL-1")

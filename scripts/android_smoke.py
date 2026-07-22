@@ -129,7 +129,7 @@ def require_single_device(adb_output: str) -> str:
 def assert_interactive_device(power_state: str, window_policy: str) -> None:
     if "mWakefulness=Awake" not in power_state:
         raise SmokeFailure("Android device must be awake before spawn acceptance")
-    if "mInputRestricted=true" in window_policy:
+    if "mInputRestricted=false" not in window_policy:
         raise SmokeFailure("Android device must be unlocked before spawn acceptance")
 
 
@@ -224,7 +224,7 @@ def run_command(
 def adb(
     serial: str, *arguments: str | os.PathLike[str], check: bool = True
 ) -> subprocess.CompletedProcess[str]:
-    return run_command(["adb", "-s", serial, *arguments], check=check)
+    return run_command(["adb", "-s", serial, *arguments], check=check, redact=(serial,))
 
 
 def root_shell(
@@ -653,11 +653,50 @@ def _exercise_gadget(
 def _cleanup(config: AndroidSmokeConfig, serial: str) -> None:
     remote_server = f"{REMOTE_DIR}/{config.name}-server"
     remote_loader = f"{REMOTE_DIR}/gadget-loader"
-    root_shell(serial, f"pkill -9 -f {remote_server} || true", check=False)
-    root_shell(serial, f"pkill -9 -f {remote_loader} || true", check=False)
-    root_shell(serial, f"rm -rf -- {REMOTE_DIR}", check=False)
+    remote_processes = (remote_server, remote_loader)
+    failures: list[str] = []
+
+    for remote_process in remote_processes:
+        result = root_shell(
+            serial,
+            f"pkill -9 -f '^{remote_process}([[:space:]]|$)'",
+            check=False,
+        )
+        if result.returncode not in (0, 1):
+            failures.append(f"stop {Path(remote_process).name} (exit {result.returncode})")
+
+    remove_result = root_shell(serial, f"rm -rf -- {REMOTE_DIR}", check=False)
+    if remove_result.returncode != 0:
+        failures.append(f"remove remote test directory (exit {remove_result.returncode})")
+
     for port in (config.port, choose_gadget_port(config.port)):
         adb(serial, "forward", "--remove", f"tcp:{port}", check=False)
+
+    for remote_process in remote_processes:
+        result = root_shell(
+            serial,
+            f"pgrep -f '^{remote_process}([[:space:]]|$)'",
+            check=False,
+        )
+        if result.returncode == 0:
+            failures.append(f"process remains: {Path(remote_process).name}")
+        elif result.returncode != 1:
+            failures.append(f"verify {Path(remote_process).name} (exit {result.returncode})")
+
+    directory_result = root_shell(serial, f"test ! -e {REMOTE_DIR}", check=False)
+    if directory_result.returncode != 0:
+        failures.append("remote test directory remains")
+
+    forward_result = adb(serial, "forward", "--list", check=False)
+    if forward_result.returncode != 0:
+        failures.append(f"list adb forwards (exit {forward_result.returncode})")
+    else:
+        for port in (config.port, choose_gadget_port(config.port)):
+            if f"tcp:{port}" in forward_result.stdout:
+                failures.append(f"adb forward remains: tcp:{port}")
+
+    if failures:
+        raise SmokeFailure("Android smoke cleanup failed: " + "; ".join(failures))
 
 
 def run_android_smoke(config: AndroidSmokeConfig, script_path: Path) -> dict[str, object]:
@@ -675,6 +714,7 @@ def run_android_smoke(config: AndroidSmokeConfig, script_path: Path) -> dict[str
     if "package:" not in package_result.stdout:
         raise SmokeFailure(f"Android package is not installed: {config.package}")
 
+    primary_error: Exception | None = None
     try:
         remote_server, remote_gadget = _prepare_remote_files(config, serial)
         abi, api_level = _read_android_platform(serial)
@@ -694,7 +734,7 @@ def run_android_smoke(config: AndroidSmokeConfig, script_path: Path) -> dict[str
         _configure_forward(serial, config.port, server_endpoint.socket)
         run_command(
             server_start_command(serial, remote_server, server_endpoint),
-            redact=(server_endpoint.token,),
+            redact=(serial, server_endpoint.token),
         )
         server_device, processes = _wait_for_remote_device(
             manager,
@@ -722,8 +762,18 @@ def run_android_smoke(config: AndroidSmokeConfig, script_path: Path) -> dict[str
         )
         report["status"] = "passed"
         return report
+    except Exception as error:
+        primary_error = error
+        raise
     finally:
-        _cleanup(config, serial)
+        try:
+            _cleanup(config, serial)
+        except SmokeFailure as cleanup_error:
+            if primary_error is not None:
+                raise SmokeFailure(
+                    f"{primary_error}; cleanup also failed: {cleanup_error}"
+                ) from primary_error
+            raise
 
 
 def _write_report(path: Path, payload: dict[str, object]) -> None:
