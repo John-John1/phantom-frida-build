@@ -113,7 +113,7 @@ def analyze_proc_maps(text: str) -> dict[str, int]:
         report["executable"] += 1
         if permissions.startswith("rwx"):
             report["rwx"] += 1
-            if not path or path.startswith("[anon:"):
+            if not path or path.startswith("["):
                 report["anonymous_rwx"] += 1
         if "(deleted)" in path:
             report["deleted_executable"] += 1

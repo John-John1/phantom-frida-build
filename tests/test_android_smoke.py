@@ -64,8 +64,9 @@ def test_proc_maps_report_distinguishes_anonymous_rwx_from_art_jit() -> None:
     }
 
 
-def test_proc_maps_report_treats_named_anon_rwx_as_anonymous() -> None:
-    report = android_smoke.analyze_proc_maps("7000-8000 rwxp 00000000 00:00 0 [anon:gum-code]\n")
+@pytest.mark.parametrize("path", ["[anon:gum-code]", "[stack]"])
+def test_proc_maps_report_treats_bracketed_rwx_as_anonymous(path: str) -> None:
+    report = android_smoke.analyze_proc_maps(f"7000-8000 rwxp 00000000 00:00 0 {path}\n")
 
     assert report["anonymous_rwx"] == 1
 
@@ -636,6 +637,8 @@ def test_acceptance_agent_uses_frida_17_file_and_java_wrapper_apis() -> None:
     assert "Java.cast(iterator.next(), Thread).getName()" in source
     assert "rpc.exports" in source
     assert "add(left, right)" in source
+    assert "Interceptor.attach" in source
+    assert "new NativeFunction" in source
 
 
 def test_report_writer_omits_device_serial(tmp_path: Path) -> None:

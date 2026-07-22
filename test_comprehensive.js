@@ -89,6 +89,38 @@ setTimeout(function () {
         fail('agent export lookup failed', error);
     }
 
+    // 5. Native hook execution (exercises Gum's executable-code allocator).
+    var getpidListener = null;
+    try {
+        var getpidAddress = Module.findGlobalExportByName('getpid');
+        if (getpidAddress === null) {
+            fail('getpid export unavailable');
+        } else {
+            var getpidObserved = false;
+            getpidListener = Interceptor.attach(getpidAddress, {
+                onEnter() {
+                    getpidObserved = true;
+                }
+            });
+            Interceptor.flush();
+
+            var getpid = new NativeFunction(getpidAddress, 'int', []);
+            var observedPid = getpid();
+            if (!getpidObserved) {
+                fail('native getpid hook did not execute');
+            }
+            if (observedPid !== Process.id) {
+                fail('native getpid returned unexpected pid', observedPid);
+            }
+        }
+    } catch (error) {
+        fail('native hook acceptance failed', error);
+    } finally {
+        if (getpidListener !== null) {
+            getpidListener.detach();
+        }
+    }
+
     if (!javaAvailable) {
         fail('Java bridge unavailable');
         finish();
