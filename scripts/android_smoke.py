@@ -6,6 +6,7 @@ import importlib
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -27,7 +28,29 @@ REMOTE_DIR = "/data/local/tmp/phantom-frida-test"
 JAVA_BRIDGE_DIR = REPOSITORY_ROOT / "node_modules" / "frida-java-bridge"
 PACKAGE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$")
 SCRIPT_TIMEOUT_SECONDS = 45
+MEMORY_SCAN_MARKERS = (
+    "frida:rpc",
+    "FridaScriptEngine",
+    "GLib-GIO",
+    "GDBusProxy",
+    "GumScript",
+    "Frida/",
+    "frida-agent",
+    "frida-gadget",
+    "frida-eternal-agent",
+    "frida-generate-certificate",
+    "frida-main-loop",
+    "gum-js-loop",
+    "pool-frida",
+    "pool-spawner",
+)
 GADGET_PROBE_SOURCE = """'use strict';
+
+rpc.exports = {
+  add(left, right) {
+    return left + right;
+  }
+};
 
 send({ type: 'phantom-frida-gadget-result' });
 """
@@ -47,17 +70,53 @@ class AndroidSmokeConfig:
     ndk: Path
 
 
+@dataclass(frozen=True)
+class RemoteEndpoint:
+    socket: str
+    origin: str
+    token: str
+
+
+def create_remote_endpoint(name: str, role: str) -> RemoteEndpoint:
+    nonce = secrets.token_hex(8)
+    return RemoteEndpoint(
+        socket=f"{name}-{role}-{nonce}",
+        origin=f"https://{nonce}.invalid",
+        token=secrets.token_urlsafe(24),
+    )
+
+
 def choose_gadget_port(server_port: int) -> int:
     candidate = server_port + 1
     return candidate if candidate <= 65535 and candidate != 27042 else 27043
 
 
 def assert_clean_proc_text(label: str, text: str) -> None:
-    forbidden = ("frida-zymbiote", "frida-server", "frida-helper")
+    forbidden: tuple[str, ...] = (
+        "frida-zymbiote",
+        "frida-server",
+        "frida-helper",
+        "frida-gadget",
+        "frida-eternal-agent",
+        "frida-generate-certificate",
+        "frida-main-loop",
+    )
+    if label == "threads":
+        forbidden += (
+            "gum-js-loop",
+            "gmain",
+            "gdbus",
+            "pool-frida",
+            "pool-spawner",
+        )
+    elif label == "fds":
+        forbidden += ("linjector",)
     lowered = text.lower()
     matches = [marker for marker in forbidden if marker in lowered]
     if matches:
         raise SmokeFailure(f"{label} contains forbidden marker(s): {', '.join(matches)}")
+    if label == "status" and re.search(r"^TracerPid:\s*[1-9]\d*$", text, re.MULTILINE):
+        raise SmokeFailure("status contains an active TracerPid")
 
 
 def require_single_device(adb_output: str) -> str:
@@ -71,7 +130,14 @@ def require_single_device(adb_output: str) -> str:
     return devices[0]
 
 
-def server_start_command(serial: str, remote_server: str, port: int) -> list[str]:
+def assert_interactive_device(power_state: str, window_policy: str) -> None:
+    if "mWakefulness=Awake" not in power_state:
+        raise SmokeFailure("Android device must be awake before spawn acceptance")
+    if "mInputRestricted=false" not in window_policy:
+        raise SmokeFailure("Android device must be unlocked before spawn acceptance")
+
+
+def server_start_command(serial: str, remote_server: str, endpoint: RemoteEndpoint) -> list[str]:
     remote_log = f"{REMOTE_DIR}/server.log"
     return [
         "adb",
@@ -80,7 +146,11 @@ def server_start_command(serial: str, remote_server: str, port: int) -> list[str
         "shell",
         "su",
         "-c",
-        (f"{remote_server} -l 0.0.0.0:{port} -D </dev/null >{remote_log} 2>&1"),
+        (
+            f"{remote_server} -l unix:{endpoint.socket} "
+            f"--origin {endpoint.origin} --token {endpoint.token} "
+            f"-D </dev/null >{remote_log} 2>&1"
+        ),
     ]
 
 
@@ -127,16 +197,29 @@ def validate_config(
 
 
 def run_command(
-    command: Sequence[str | os.PathLike[str]], *, check: bool = True
+    command: Sequence[str | os.PathLike[str]],
+    *,
+    check: bool = True,
+    redact: Sequence[str] = (),
 ) -> subprocess.CompletedProcess[str]:
     argv = [os.fspath(part) for part in command]
-    print(f"+ {subprocess.list2cmdline(argv)}", flush=True)
+    displayed_argv = []
+    for part in argv:
+        displayed = part
+        for secret in redact:
+            if secret:
+                displayed = displayed.replace(secret, "<redacted>")
+        displayed_argv.append(displayed)
+    print(f"+ {subprocess.list2cmdline(displayed_argv)}", flush=True)
     try:
         result = subprocess.run(argv, capture_output=True, text=True)
     except OSError as error:
         raise SmokeFailure(f"Unable to run {argv[0]}: {error}") from error
     if check and result.returncode != 0:
         details = (result.stderr or result.stdout or "").strip()
+        for secret in redact:
+            if secret:
+                details = details.replace(secret, "<redacted>")
         suffix = f": {details}" if details else ""
         raise SmokeFailure(f"Command failed with exit code {result.returncode}: {argv[0]}{suffix}")
     return result
@@ -145,7 +228,7 @@ def run_command(
 def adb(
     serial: str, *arguments: str | os.PathLike[str], check: bool = True
 ) -> subprocess.CompletedProcess[str]:
-    return run_command(["adb", "-s", serial, *arguments], check=check)
+    return run_command(["adb", "-s", serial, *arguments], check=check, redact=(serial,))
 
 
 def root_shell(
@@ -206,13 +289,13 @@ def _prepare_remote_files(config: AndroidSmokeConfig, serial: str) -> tuple[str,
     return remote_server, remote_gadget
 
 
-def _configure_forward(serial: str, port: int) -> None:
+def _configure_forward(serial: str, port: int, socket_name: str) -> None:
     adb(serial, "forward", "--remove", f"tcp:{port}", check=False)
-    adb(serial, "forward", f"tcp:{port}", f"tcp:{port}")
+    adb(serial, "forward", f"tcp:{port}", f"localabstract:{socket_name}")
 
 
 def _wait_for_remote_device(
-    manager: Any, address: str, *, timeout: float = 20
+    manager: Any, address: str, endpoint: RemoteEndpoint, *, timeout: float = 20
 ) -> tuple[Any, list[Any]]:
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
@@ -220,7 +303,11 @@ def _wait_for_remote_device(
     while time.monotonic() < deadline:
         try:
             if device is None:
-                device = manager.add_remote_device(address)
+                device = manager.add_remote_device(
+                    address,
+                    origin=endpoint.origin,
+                    token=endpoint.token,
+                )
             return device, list(device.enumerate_processes())
         except Exception as error:  # external Frida exceptions vary by version
             last_error = error
@@ -229,7 +316,11 @@ def _wait_for_remote_device(
 
 
 def _run_script_acceptance(
-    device: Any, serial: str, package: str, agent_source: str
+    device: Any,
+    serial: str,
+    package: str,
+    agent_source: str,
+    memory_scanner: str,
 ) -> dict[str, object]:
     pid: int | None = None
     session: Any = None
@@ -256,6 +347,8 @@ def _run_script_acceptance(
         script = session.create_script(agent_source)
         script.on("message", on_message)
         script.load()
+        if script.exports_sync.add(20, 22) != 42:
+            raise SmokeFailure("Stock Frida RPC returned an unexpected server result")
         device.resume(pid)
 
         if not completed.wait(SCRIPT_TIMEOUT_SECONDS):
@@ -273,11 +366,17 @@ def _run_script_acceptance(
         if payload.get("javaAvailable") is not True:
             raise SmokeFailure("Java bridge is unavailable in the selected application")
 
-        _scan_process_procfs(serial, pid)
+        memory_report = _scan_process_procfs(
+            serial,
+            pid,
+            memory_scanner,
+            "memfd:jit-code-cache",
+        )
         return {
             "pid": pid,
             "java_available": True,
             "script_failures": [],
+            "memory": memory_report,
         }
     except SmokeFailure:
         raise
@@ -296,16 +395,53 @@ def _run_script_acceptance(
                 pass
 
 
-def _scan_process_procfs(serial: str, pid: int) -> None:
+def _parse_memory_scan(label: str, output: str) -> dict[str, int]:
+    values: dict[str, int] = {}
+    counts: dict[str, int] = {}
+    for line in output.splitlines():
+        if match := re.fullmatch(r"(ranges|executable)=(\d+)", line):
+            values[match.group(1)] = int(match.group(2))
+        elif match := re.fullmatch(r"marker=(.+) count=(\d+)", line):
+            counts[match.group(1)] = int(match.group(2))
+
+    if values.get("ranges", 0) == 0:
+        raise SmokeFailure(f"{label} memory scan found no matching memory ranges")
+    missing = [marker for marker in MEMORY_SCAN_MARKERS if marker not in counts]
+    if missing:
+        raise SmokeFailure(f"{label} memory scan omitted marker(s): {', '.join(missing)}")
+    detected = [
+        f"{marker}={counts[marker]}" for marker in MEMORY_SCAN_MARKERS if counts[marker] != 0
+    ]
+    if detected:
+        raise SmokeFailure(f"{label} memory scan found runtime signature(s): {', '.join(detected)}")
+    return {
+        "ranges": values["ranges"],
+        "executable": values.get("executable", 0),
+    }
+
+
+def _scan_process_procfs(
+    serial: str,
+    pid: int,
+    memory_scanner: str,
+    mapping_needle: str,
+) -> dict[str, int]:
     commands = {
         "unix": "cat /proc/net/unix",
         "maps": f"cat /proc/{pid}/maps",
         "fds": f"ls -l /proc/{pid}/fd",
+        "status": f"cat /proc/{pid}/status",
         "threads": f"cat /proc/{pid}/task/*/comm",
     }
     for label, command in commands.items():
         result = root_shell(serial, command)
         assert_clean_proc_text(label, result.stdout)
+    marker_arguments = " ".join(MEMORY_SCAN_MARKERS)
+    result = root_shell(
+        serial,
+        f"{memory_scanner} {pid} {mapping_needle} {marker_arguments}",
+    )
+    return _parse_memory_scan(mapping_needle, result.stdout)
 
 
 def _run_gadget_script_acceptance(device: Any, pid: int) -> None:
@@ -332,6 +468,8 @@ def _run_gadget_script_acceptance(device: Any, pid: int) -> None:
         script = session.create_script(GADGET_PROBE_SOURCE)
         script.on("message", on_message)
         script.load()
+        if "error" not in outcome and script.exports_sync.add(20, 22) != 42:
+            raise SmokeFailure("Stock Frida RPC returned an unexpected Gadget result")
         if not completed.wait(SCRIPT_TIMEOUT_SECONDS):
             raise SmokeFailure(
                 f"Frida Gadget script timed out after {SCRIPT_TIMEOUT_SECONDS} seconds"
@@ -364,9 +502,7 @@ def _find_ndk_clang(ndk: Path) -> Path:
     return candidates[0]
 
 
-def _compile_gadget_loader(
-    config: AndroidSmokeConfig, abi: str, api_level: int, output: Path
-) -> None:
+def _android_clang_target(abi: str, api_level: int) -> str:
     target_by_abi = {
         "arm64-v8a": "aarch64-linux-android",
         "armeabi-v7a": "armv7a-linux-androideabi",
@@ -375,14 +511,20 @@ def _compile_gadget_loader(
     }
     target = target_by_abi.get(abi)
     if target is None:
-        raise SmokeFailure(f"Unsupported Android ABI for Gadget loader: {abi}")
+        raise SmokeFailure(f"Unsupported Android ABI: {abi}")
+    return f"{target}{max(api_level, 21)}"
+
+
+def _compile_gadget_loader(
+    config: AndroidSmokeConfig, abi: str, api_level: int, output: Path
+) -> None:
     source = REPOSITORY_ROOT / "tests" / "android" / "gadget-loader.c"
     if not source.is_file():
         raise SmokeFailure(f"Gadget loader source is missing: {source}")
     run_command(
         [
             _find_ndk_clang(config.ndk),
-            f"--target={target}{max(api_level, 21)}",
+            f"--target={_android_clang_target(abi, api_level)}",
             "-fPIE",
             "-pie",
             source,
@@ -393,21 +535,73 @@ def _compile_gadget_loader(
     )
 
 
-def _exercise_gadget(
-    config: AndroidSmokeConfig,
-    serial: str,
-    manager: Any,
-    remote_gadget: str,
-) -> dict[str, object]:
-    gadget_port = choose_gadget_port(config.port)
-    _configure_forward(serial, gadget_port)
+def _compile_proc_memory_scanner(
+    config: AndroidSmokeConfig, abi: str, api_level: int, output: Path
+) -> None:
+    source = REPOSITORY_ROOT / "tests" / "android" / "proc-memory-scanner.c"
+    if not source.is_file():
+        raise SmokeFailure(f"Process memory scanner source is missing: {source}")
+    run_command(
+        [
+            _find_ndk_clang(config.ndk),
+            f"--target={_android_clang_target(abi, api_level)}",
+            "-fPIE",
+            "-pie",
+            source,
+            "-o",
+            output,
+        ]
+    )
+
+
+def _read_android_platform(serial: str) -> tuple[str, int]:
     abi = adb(serial, "shell", "getprop", "ro.product.cpu.abi").stdout.strip()
     api_text = adb(serial, "shell", "getprop", "ro.build.version.sdk").stdout.strip()
     try:
         api_level = int(api_text)
     except ValueError as error:
         raise SmokeFailure(f"Invalid Android API level reported by device: {api_text!r}") from error
+    _android_clang_target(abi, api_level)
+    return abi, api_level
 
+
+def _prepare_proc_memory_scanner(
+    config: AndroidSmokeConfig,
+    serial: str,
+    abi: str,
+    api_level: int,
+) -> str:
+    remote_scanner = f"{REMOTE_DIR}/proc-memory-scanner"
+    with tempfile.TemporaryDirectory(prefix="phantom-frida-scanner-") as temporary:
+        scanner = Path(temporary) / "proc-memory-scanner"
+        _compile_proc_memory_scanner(config, abi, api_level, scanner)
+        adb(serial, "push", scanner, remote_scanner)
+    adb(serial, "shell", "chmod", "755", remote_scanner)
+    return remote_scanner
+
+
+def _gadget_interaction(endpoint: RemoteEndpoint) -> dict[str, str]:
+    return {
+        "type": "listen",
+        "address": f"unix:{endpoint.socket}",
+        "origin": endpoint.origin,
+        "token": endpoint.token,
+        "on_load": "resume",
+    }
+
+
+def _exercise_gadget(
+    config: AndroidSmokeConfig,
+    serial: str,
+    manager: Any,
+    remote_gadget: str,
+    memory_scanner: str,
+    abi: str,
+    api_level: int,
+) -> dict[str, object]:
+    gadget_port = choose_gadget_port(config.port)
+    endpoint = create_remote_endpoint(config.name, "gadget")
+    _configure_forward(serial, gadget_port, endpoint.socket)
     remote_loader = f"{REMOTE_DIR}/gadget-loader"
     remote_config = f"{REMOTE_DIR}/lib{config.name}-gadget.config.so"
     remote_log = f"{REMOTE_DIR}/gadget-loader.log"
@@ -418,14 +612,7 @@ def _exercise_gadget(
         _compile_gadget_loader(config, abi, api_level, loader)
         gadget_config.write_text(
             json.dumps(
-                {
-                    "interaction": {
-                        "type": "listen",
-                        "address": "0.0.0.0",
-                        "port": gadget_port,
-                        "on_load": "resume",
-                    }
-                },
+                {"interaction": _gadget_interaction(endpoint)},
                 indent=2,
                 sort_keys=True,
             )
@@ -440,7 +627,11 @@ def _exercise_gadget(
         f"{remote_loader} {remote_gadget} >{remote_log} 2>&1 &",
     )
 
-    gadget_device, processes = _wait_for_remote_device(manager, f"127.0.0.1:{gadget_port}")
+    gadget_device, processes = _wait_for_remote_device(
+        manager,
+        f"127.0.0.1:{gadget_port}",
+        endpoint,
+    )
     if not processes:
         raise SmokeFailure("Stock Frida enumerated no process through Gadget")
     gadget_pid = getattr(processes[0], "pid", None)
@@ -448,22 +639,134 @@ def _exercise_gadget(
         raise SmokeFailure("Stock Frida returned a Gadget process without an integer pid")
     _run_gadget_script_acceptance(gadget_device, gadget_pid)
     assert_clean_proc_text("gadget unix", root_shell(serial, "cat /proc/net/unix").stdout)
+    memory_report = _scan_process_procfs(
+        serial,
+        gadget_pid,
+        memory_scanner,
+        f"lib{config.name}-gadget.so",
+    )
     return {
         "abi": abi,
         "api_level": api_level,
         "port": gadget_port,
         "process_count": len(processes),
         "script_loaded": True,
+        "memory": memory_report,
     }
 
 
+def _parse_remote_processes(output: str, remote_executables: Sequence[str]) -> dict[str, list[int]]:
+    matches: dict[str, list[int]] = {path: [] for path in remote_executables}
+    for line in output.splitlines():
+        match = re.search(r"/proc/(\d+)/exe -> (.+)$", line)
+        if match is None:
+            continue
+        target = match.group(2).removesuffix(" (deleted)")
+        if target in matches:
+            matches[target].append(int(match.group(1)))
+    return matches
+
+
+def _remote_signal_command(remote_executable: str, pid: int, signal: str) -> str:
+    body = (
+        f"target=$(readlink /proc/{pid}/exe 2>/dev/null) || exit 0; "
+        f'case "$target" in "{remote_executable}"|"{remote_executable} (deleted)") '
+        f"kill -{signal} {pid} || exit 1 ;; esac; exit 0"
+    )
+    return f"'{body}'"
+
+
 def _cleanup(config: AndroidSmokeConfig, serial: str) -> None:
-    remote_server = f"{REMOTE_DIR}/{config.name}-server"
-    remote_loader = f"{REMOTE_DIR}/gadget-loader"
-    root_shell(serial, f"pkill -9 -f {remote_server} || true", check=False)
-    root_shell(serial, f"pkill -9 -f {remote_loader} || true", check=False)
+    processes = (
+        (f"{config.name}-server", f"{REMOTE_DIR}/{config.name}-server"),
+        ("gadget-loader", f"{REMOTE_DIR}/gadget-loader"),
+    )
+    failures: list[str] = []
+    remote_executables = tuple(path for _label, path in processes)
+
+    def snapshot(stage: str) -> dict[str, list[int]] | None:
+        result = root_shell(
+            serial,
+            "'ls -l /proc/[0-9]*/exe 2>/dev/null; exit 0'",
+            check=False,
+        )
+        if result.returncode != 0:
+            failures.append(f"{stage} (exit {result.returncode})")
+            return None
+        return _parse_remote_processes(result.stdout, remote_executables)
+
+    initial = snapshot("list Android smoke processes")
+    if initial is not None:
+        for label, remote_executable in processes:
+            for pid in initial[remote_executable]:
+                result = root_shell(
+                    serial,
+                    _remote_signal_command(remote_executable, pid, "TERM"),
+                    check=False,
+                )
+                if result.returncode != 0:
+                    failures.append(f"stop {label} (exit {result.returncode})")
+        if any(initial.values()):
+            time.sleep(0.5)
+
+    remaining = snapshot("verify Android smoke processes")
+    forced_labels: list[str] = []
+    if remaining is not None:
+        for label, remote_executable in processes:
+            for pid in remaining[remote_executable]:
+                if label not in forced_labels:
+                    forced_labels.append(label)
+                result = root_shell(
+                    serial,
+                    _remote_signal_command(remote_executable, pid, "KILL"),
+                    check=False,
+                )
+                if result.returncode != 0:
+                    failures.append(f"force-stop {label} (exit {result.returncode})")
+
+    if forced_labels:
+        failures.append("processes did not stop gracefully: " + ", ".join(forced_labels))
+        time.sleep(0.2)
+        final = snapshot("verify Android smoke processes after SIGKILL")
+        if final is not None:
+            for label, remote_executable in processes:
+                if final[remote_executable]:
+                    failures.append(f"process remains: {label}")
+
+    remove_result = root_shell(serial, f"rm -rf -- {REMOTE_DIR}", check=False)
+    if remove_result.returncode != 0:
+        failures.append(f"remove remote test directory (exit {remove_result.returncode})")
+
     for port in (config.port, choose_gadget_port(config.port)):
         adb(serial, "forward", "--remove", f"tcp:{port}", check=False)
+
+    directory_result = root_shell(serial, f"test ! -e {REMOTE_DIR}", check=False)
+    if directory_result.returncode != 0:
+        failures.append("remote test directory remains")
+
+    socket_result = root_shell(serial, "cat /proc/net/unix", check=False)
+    if socket_result.returncode != 0:
+        failures.append(f"list unix sockets (exit {socket_result.returncode})")
+    else:
+        socket_markers = (
+            f"@{config.name}-server-",
+            f"@{config.name}-gadget-",
+            f"@/{config.name}-zymbiote-",
+        )
+        for marker in socket_markers:
+            if marker in socket_result.stdout:
+                failures.append(f"unix socket remains: {marker}")
+
+    forward_result = adb(serial, "forward", "--list", check=False)
+    if forward_result.returncode != 0:
+        failures.append(f"list adb forwards (exit {forward_result.returncode})")
+    else:
+        for port in (config.port, choose_gadget_port(config.port)):
+            if f"tcp:{port}" in forward_result.stdout:
+                failures.append(f"adb forward remains: tcp:{port}")
+
+    if failures:
+        raise SmokeFailure("Android smoke cleanup failed: " + "; ".join(failures))
 
 
 def run_android_smoke(config: AndroidSmokeConfig, script_path: Path) -> dict[str, object]:
@@ -473,32 +776,74 @@ def run_android_smoke(config: AndroidSmokeConfig, script_path: Path) -> dict[str
     root_result = root_shell(serial, "id")
     if "uid=0" not in root_result.stdout:
         raise SmokeFailure(f"adb device does not provide root through su: {root_result.stdout}")
+    assert_interactive_device(
+        adb(serial, "shell", "dumpsys", "power").stdout,
+        adb(serial, "shell", "dumpsys", "window", "policy").stdout,
+    )
     package_result = adb(serial, "shell", "pm", "path", config.package)
     if "package:" not in package_result.stdout:
         raise SmokeFailure(f"Android package is not installed: {config.package}")
 
-    remote_server, remote_gadget = _prepare_remote_files(config, serial)
-    manager = frida_module.get_device_manager()
-    report: dict[str, object] = {
-        "frida_version": str(frida_module.__version__),
-        "package": config.package,
-        "server_port": config.port,
-    }
+    primary_error: Exception | None = None
     try:
-        _configure_forward(serial, config.port)
-        run_command(server_start_command(serial, remote_server, config.port))
-        server_device, processes = _wait_for_remote_device(manager, f"127.0.0.1:{config.port}")
+        remote_server, remote_gadget = _prepare_remote_files(config, serial)
+        abi, api_level = _read_android_platform(serial)
+        memory_scanner = _prepare_proc_memory_scanner(
+            config,
+            serial,
+            abi,
+            api_level,
+        )
+        server_endpoint = create_remote_endpoint(config.name, "server")
+        manager = frida_module.get_device_manager()
+        report: dict[str, object] = {
+            "frida_version": str(frida_module.__version__),
+            "package": config.package,
+            "server_port": config.port,
+        }
+        _configure_forward(serial, config.port, server_endpoint.socket)
+        run_command(
+            server_start_command(serial, remote_server, server_endpoint),
+            redact=(serial, server_endpoint.token),
+        )
+        server_device, processes = _wait_for_remote_device(
+            manager,
+            f"127.0.0.1:{config.port}",
+            server_endpoint,
+        )
         if not processes:
             raise SmokeFailure("Stock Frida enumerated no processes through the server")
         report["server_process_count"] = len(processes)
         report["server"] = _run_script_acceptance(
-            server_device, serial, config.package, agent_source
+            server_device,
+            serial,
+            config.package,
+            agent_source,
+            memory_scanner,
         )
-        report["gadget"] = _exercise_gadget(config, serial, manager, remote_gadget)
+        report["gadget"] = _exercise_gadget(
+            config,
+            serial,
+            manager,
+            remote_gadget,
+            memory_scanner,
+            abi,
+            api_level,
+        )
         report["status"] = "passed"
         return report
+    except Exception as error:
+        primary_error = error
+        raise
     finally:
-        _cleanup(config, serial)
+        try:
+            _cleanup(config, serial)
+        except SmokeFailure as cleanup_error:
+            if primary_error is not None:
+                raise SmokeFailure(
+                    f"{primary_error}; cleanup also failed: {cleanup_error}"
+                ) from primary_error
+            raise
 
 
 def _write_report(path: Path, payload: dict[str, object]) -> None:

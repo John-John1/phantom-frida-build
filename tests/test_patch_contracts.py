@@ -50,6 +50,93 @@ def make_core_fixture(tmp_path: Path) -> Path:
         (FIXTURE_DIR / "gumexceptor-posix.c").read_text(encoding="utf-8"),
         encoding="utf-8",
     )
+
+    runtime_sources = {
+        "subprojects/frida-core/lib/base/rpc.vala": """namespace Frida {
+\tpublic sealed class RpcClient : Object {
+\t\tvoid build_request (Json.Builder request) {
+\t\t\trequest.add_string_value (\"frida:rpc\");
+\t\t}
+\t\tbool inspect (string json, string? type) {
+\t\t\tif (json.index_of (\"\\\"frida:rpc\\\"\") == -1)
+\t\t\t\treturn false;
+\t\t\tif (type == null || type != \"frida:rpc\")
+\t\t\t\treturn false;
+\t\t\treturn true;
+\t\t}
+\t\tprivate class PendingResponse {
+\t\t}
+\t}
+}
+""",
+        "subprojects/frida-core/src/barebone/script-runtime/message-dispatcher.ts": (
+            "export class MessageDispatcher {\n"
+            "  dispatch(message) {\n"
+            '    if (message[0] === "frida:rpc") {\n'
+            '      send(["frida:rpc"]);\n'
+            '      send(["frida:rpc"]);\n'
+            "    }\n"
+            "  }\n"
+            "}\n"
+        ),
+        "subprojects/frida-gum/bindings/gumjs/runtime/message-dispatcher.js": (
+            "export function MessageDispatcher() {\n"
+            "  if (message[0] === 'frida:rpc') {\n"
+            "    send(['frida:rpc']);\n"
+            "    send(['frida:rpc']);\n"
+            "    send(['frida:rpc']);\n"
+            "  }\n"
+            "}\n"
+        ),
+        "subprojects/frida-gum/bindings/gumjs/runtime/worker.js": (
+            "export class Worker {\n"
+            "  request(payload) {\n"
+            "    if (payload[0] === 'frida:rpc') this.post(['frida:rpc']);\n"
+            "  }\n"
+            "}\n"
+        ),
+        "subprojects/frida-core/lib/gadget/gadget-glue.c": (
+            'worker_thread = g_thread_new ("frida-gadget", run_worker_loop, NULL);\n'
+        ),
+        "subprojects/frida-core/lib/gadget/gadget.vala": (
+            'Environment.set_thread_name ("frida-gadget-tcp-%u".printf (listen_port));\n'
+            'Environment.set_thread_name ("frida-gadget-unix");\n'
+        ),
+        "subprojects/frida-core/lib/agent/agent.vala": (
+            'new Thread<bool> ("frida-eternal-agent", callback);\n' * 3
+        ),
+        "subprojects/frida-core/lib/base/p2p.vala": (
+            'new Thread<bool> ("frida-generate-certificate", callback);\n'
+        ),
+        "subprojects/frida-core/lib/base/socket.vala": (
+            'headers.replace ("User-Agent", "Frida/" + version);\n' * 3
+        ),
+        "subprojects/frida-core/src/frida-glue.c": (
+            'main_thread = g_thread_new ("frida-main-loop", run_main_loop, NULL);\n'
+        ),
+        "subprojects/frida-core/src/host-session-service.vala": (
+            'e = new Error.PROCESS_NOT_RESPONDING ("Process with pid %u either refused to load '
+            'frida-agent, " +\n'
+            '    "or terminated during injection", pid);\n'
+        ),
+        "subprojects/frida-gum/bindings/gumjs/guminspectorserver.c": (
+            'json_builder_add_string_value (builder, "Frida/v" FRIDA_VERSION);\n'
+        ),
+        "subprojects/frida-core/lib/payload/portal-client.vala": (
+            'throw new Error.NOT_SUPPORTED ("unsupported by frida-gadget");\n'
+        ),
+        "subprojects/frida-core/src/droidy/injector.vala": (
+            'string so_path = "/data/local/tmp/frida-gadget-id.so";\n'
+            'string config_path = "/data/local/tmp/frida-gadget-id.config";\n'
+        ),
+        "subprojects/frida-core/src/droidy/droidy-host-session.vala": (
+            'throw new Error.NOT_SUPPORTED ("frida-gadget.so to use");\n'
+        ),
+    }
+    for relative_path, content in runtime_sources.items():
+        target = tmp_path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
     return tmp_path
 
 
@@ -97,6 +184,45 @@ def test_required_patch_fails_when_upstream_contract_drifts(tmp_path: Path) -> N
 
     with pytest.raises(build.BuildError, match="re/frida/HelperBackend"):
         build.apply_required_file_patches(root, "oemcodec")
+
+
+def test_required_patches_remove_runtime_rpc_branding_and_thread_markers(tmp_path: Path) -> None:
+    root = make_core_fixture(tmp_path)
+
+    build.apply_required_file_patches(root, "oemcodec")
+
+    combined = "\n".join(
+        path.read_text(encoding="utf-8") for path in root.rglob("*.*") if path.is_file()
+    )
+    for marker in (
+        "frida:rpc",
+        "frida-agent",
+        "frida-gadget",
+        "frida-eternal-agent",
+        "frida-generate-certificate",
+        "frida-main-loop",
+        "Frida/",
+    ):
+        assert marker not in combined
+    assert "String.fromCharCode(102, 114, 105, 100, 97, 58, 114, 112, 99)" in combined
+    assert "make_rpc_tag" in combined
+    assert "oemcodec-gadget" in combined
+    assert "Oemcodec/" in combined
+
+
+def test_targeted_patch_uses_non_counted_art_jit_memfd_name(tmp_path: Path) -> None:
+    root = make_core_fixture(tmp_path)
+    linux = root / "subprojects/frida-core/lib/base/linux.vala"
+    linux.write_text(
+        "return Linux.syscall (LinuxSyscall.MEMFD_CREATE, name, flags);\n",
+        encoding="utf-8",
+    )
+
+    build.apply_targeted_patches(root, "oemcodec", 17)
+
+    patched = linux.read_text(encoding="utf-8")
+    assert '"jit-code-cache"' in patched
+    assert '"jit-cache"' not in patched
 
 
 def test_zymbiote_artifacts_patch_the_fixed_socket_field(tmp_path: Path) -> None:

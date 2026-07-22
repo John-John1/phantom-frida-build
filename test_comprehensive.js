@@ -2,6 +2,12 @@
 
 import Java from 'frida-java-bridge';
 
+rpc.exports = {
+    add(left, right) {
+        return left + right;
+    }
+};
+
 // Structured acceptance test: native stealth markers, Java bridge, and a live hook.
 setTimeout(function () {
     var failures = [];

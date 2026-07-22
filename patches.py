@@ -11,13 +11,14 @@ Patch categories:
 
 Source verification notes (17.16.3):
   - g_set_prgname("frida") does NOT exist — removed
-  - frida-gadget-tcp/unix do NOT exist — removed
+  - Gadget worker names are frida-gadget, frida-gadget-tcp-%u, and frida-gadget-unix
   - memfd_create is in lib/base/linux.vala, NOT frida-helper-backend.vala
   - SELinux labels are in linjector.vala, NOT frida-helper-backend.vala
   - cloak.vala uses GOT slot patching, NOT Gum.Interceptor
   - gumprocess-linux.c uses entry->name, NOT details.name
 """
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +36,8 @@ class RequiredFilePatch:
 def get_required_file_patches(name: str) -> list[RequiredFilePatch]:
     """Return exact Frida source patches required for Android runtime correctness."""
     linux_host_session = "subprojects/frida-core/src/linux/linux-host-session.vala"
+    cap_name = name[0].upper() + name[1:]
+    rpc_tag_expression = "String.fromCharCode(102, 114, 105, 100, 97, 58, 114, 112, 99)"
     return [
         RequiredFilePatch(
             linux_host_session,
@@ -101,6 +104,126 @@ def get_required_file_patches(name: str) -> list[RequiredFilePatch]:
     gum_interceptor_replace (interceptor, gum_original_sigaction,
         gum_exceptor_backend_replacement_sigaction, NULL, &options);""",
             "    (void) options; /* Signal interception intentionally disabled. */",
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/lib/base/rpc.vala",
+            '.add_string_value ("frida:rpc")',
+            ".add_string_value (make_rpc_tag ())",
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/lib/base/rpc.vala",
+            'json.index_of ("\\"frida:rpc\\"")',
+            'json.index_of ("\\"%s\\"".printf (make_rpc_tag ()))',
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/lib/base/rpc.vala",
+            'type != "frida:rpc"',
+            "type != make_rpc_tag ()",
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/lib/base/rpc.vala",
+            "\t\tprivate class PendingResponse {",
+            """\t\tprivate static string make_rpc_tag () {
+\t\t\treturn "%c%c%c%c%c%c%c%c%c".printf (102, 114, 105, 100, 97, 58, 114, 112, 99);
+\t\t}
+
+\t\tprivate class PendingResponse {""",
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/src/barebone/script-runtime/message-dispatcher.ts",
+            "export class MessageDispatcher {",
+            f"const rpcTag = {rpc_tag_expression};\n\nexport class MessageDispatcher {{",
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/src/barebone/script-runtime/message-dispatcher.ts",
+            '"frida:rpc"',
+            "rpcTag",
+            minimum=3,
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-gum/bindings/gumjs/runtime/message-dispatcher.js",
+            "export function MessageDispatcher() {",
+            f"const rpcTag = {rpc_tag_expression};\n\nexport function MessageDispatcher() {{",
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-gum/bindings/gumjs/runtime/message-dispatcher.js",
+            "'frida:rpc'",
+            "rpcTag",
+            minimum=4,
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-gum/bindings/gumjs/runtime/worker.js",
+            "export class Worker {",
+            f"const rpcTag = {rpc_tag_expression};\n\nexport class Worker {{",
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-gum/bindings/gumjs/runtime/worker.js",
+            "'frida:rpc'",
+            "rpcTag",
+            minimum=2,
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/lib/gadget/gadget-glue.c",
+            'g_thread_new ("frida-gadget",',
+            f'g_thread_new ("{name}-gadget",',
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/lib/gadget/gadget.vala",
+            '"frida-gadget-tcp-%u"',
+            f'"{name}-gadget-tcp-%u"',
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/lib/gadget/gadget.vala",
+            '"frida-gadget-unix"',
+            f'"{name}-gadget-unix"',
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/lib/agent/agent.vala",
+            '"frida-eternal-agent"',
+            f'"{name}-eternal-agent"',
+            minimum=3,
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/lib/base/p2p.vala",
+            '"frida-generate-certificate"',
+            f'"{name}-generate-certificate"',
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/src/frida-glue.c",
+            '"frida-main-loop"',
+            f'"{name}-main-loop"',
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/src/host-session-service.vala",
+            "Process with pid %u either refused to load frida-agent, ",
+            f"Process with pid %u either refused to load {name}-agent, ",
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-gum/bindings/gumjs/guminspectorserver.c",
+            '"Frida/v" FRIDA_VERSION',
+            f'"{cap_name}/v" FRIDA_VERSION',
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/lib/base/socket.vala",
+            '"Frida/',
+            f'"{cap_name}/',
+            minimum=3,
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/lib/payload/portal-client.vala",
+            "frida-gadget",
+            f"{name}-gadget",
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/src/droidy/injector.vala",
+            "frida-gadget-",
+            f"{name}-gadget-",
+            minimum=2,
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-core/src/droidy/droidy-host-session.vala",
+            "frida-gadget.so",
+            f"{name}-gadget.so",
         ),
     ]
 
@@ -273,14 +396,14 @@ MEMFD_PATCHES = {
     16: {
         "file": "src/linux/frida-helper-backend.vala",
         "old": "return Linux.syscall (SysCall.memfd_create, name, flags);",
-        "new": 'return Linux.syscall (SysCall.memfd_create, "jit-cache", flags);',
+        "new": 'return Linux.syscall (SysCall.memfd_create, "jit-code-cache", flags);',
     },
     # Frida 17.x: memfd_create moved to lib/base/linux.vala
     # Verified: exact function signature and enum name
     17: {
         "file": "lib/base/linux.vala",
         "old": "return Linux.syscall (LinuxSyscall.MEMFD_CREATE, name, flags);",
-        "new": 'return Linux.syscall (LinuxSyscall.MEMFD_CREATE, "jit-cache", flags);',
+        "new": 'return Linux.syscall (LinuxSyscall.MEMFD_CREATE, "jit-code-cache", flags);',
     },
 }
 
@@ -329,6 +452,23 @@ def get_binary_patches() -> list[tuple[str, str, str]]:
             "pool-spawner\\0 -> pool-spoiler\\0",
         ),
     ]
+
+
+def get_memory_signature_patches(name: str) -> list[tuple[str, str, str]]:
+    """Return deterministic same-length aliases for mapped runtime signatures."""
+    markers = ("FridaScriptEngine", "GLib-GIO", "GDBusProxy", "GumScript")
+    patches = []
+    for marker in markers:
+        digest = hashlib.sha256(f"{name}:{marker}".encode()).hexdigest()
+        replacement = ("x" + digest)[: len(marker)]
+        patches.append(
+            (
+                marker.encode().hex(),
+                replacement.encode().hex(),
+                f'{marker} -> per-profile runtime alias "{replacement}"',
+            )
+        )
+    return patches
 
 
 # ============================================================================
@@ -472,15 +612,19 @@ Build transformations:
 
 [required source and artifact contracts]
  - Server, helper, Gadget, agent, JNI package, and zymbiote socket identifiers
- - Selected thread and memfd names, SELinux labels, and D-Bus service identifier
+ - RPC wire tag construction without a contiguous marker in mapped code
+ - Current Server, Gadget, agent, GLib, and GDBus thread names
+ - Android-compatible jit-code-cache memfd name, SELinux labels, and D-Bus service identifier
+ - Same-length per-profile aliases for mapped FridaScriptEngine/GLib/GDBus/Gum markers
  - frida_agent_main generated symbol, patched in both caller and definition
 
 [optional with --extended]
  - Configured listening port, selected GType names, and temporary path prefixes
- - Same-length residual byte replacements outside protected DEX regions
+ - Same-length residual byte replacements in runtime ELF sections outside protected DEX regions
 
 [hard output gate]
  - Rejects the explicit FORBIDDEN_BINARY_MARKERS set in Server and Gadget
+ - Strips staged Gadget symbols and non-runtime sections before verification/compression
 
 Compatibility identifiers intentionally preserved:
  - D-Bus protocol interfaces under re.frida.* and /re/frida/GadgetSession
@@ -488,4 +632,5 @@ Compatibility identifiers intentionally preserved:
  - Allowlisted protocol strings; verification does not claim every substring is removed
 
 Runtime compatibility and observation claims require scripts/android_smoke.py evidence.
+The smoke test uses authenticated abstract-UNIX endpoints and an external root memory scanner.
 """

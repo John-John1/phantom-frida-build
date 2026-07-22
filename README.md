@@ -19,11 +19,13 @@ The repository separates three kinds of evidence:
 1. Unit and fixture tests validate input handling, exact Frida 17.16.3 source
    patch contracts, DEX rebuilding, artifact promotion, metadata, workflows,
    and failure behavior.
-2. `build.py --verify` requires both Server and Gadget, then rejects known
-   forbidden runtime markers before publishing either artifact.
+2. `build.py --verify` requires both Server and Gadget, strips the staged
+   Gadget, then rejects known forbidden runtime markers before publishing
+   either artifact.
 3. `scripts/android_smoke.py` exercises a built artifact on one rooted device:
-   stock-client enumeration, spawn, attach, Java bridge assertions, `/proc`
-   scans, and a separately loaded Gadget.
+   authenticated abstract-UNIX transport, stock-client RPC, spawn, attach,
+   Java bridge assertions, `/proc` checks, an external root memory scan, and a
+   separately loaded Gadget.
 
 A passing source test or byte scan is not equivalent to runtime stealth. Claims
 about Android behavior should include the generated, redacted smoke-test report.
@@ -35,7 +37,8 @@ Run **Build Custom Frida** from the Actions tab. The reusable build workflow:
 - validates every user-controlled build input;
 - downloads Android NDK r29 from Google and checks its published checksum;
 - clones a fresh upstream source tree instead of caching patched source;
-- uploads only after the hard artifact and marker gates pass;
+- strips Gadget symbols and uploads only after the hard artifact and marker
+  gates pass;
 - includes `build-info.json` and `SHA256SUMS` in one build artifact.
 
 The weekly workflow resolves the latest release through the authenticated
@@ -127,9 +130,28 @@ frida-zymbiote
 re/frida/HelperBackend
 frida-server
 frida-helper
+frida-agent
+frida-gadget
+frida-eternal-agent
+frida-generate-certificate
+frida-main-loop
+frida:rpc
+FridaScriptEngine
+GLib-GIO
+GDBusProxy
+GumScript
+Frida/
+gum-js-loop
+gmain\0
+gdbus\0
+pool-frida
+pool-spawner
+jit-cache\0
 ```
 
-Capital `Frida` and allowlisted protocol strings are not verifier failures.
+The exact public API string `Frida\0` and allowlisted `re.frida.*` protocol
+identifiers remain intentionally preserved. The HTTP/Inspector prefix
+`Frida/` is a verifier failure and is renamed independently.
 
 ## Rooted Android acceptance
 
@@ -152,9 +174,13 @@ python3 scripts/android_smoke.py \
 
 The package must be an installed Java application you are authorized to test.
 The harness compiles `test_comprehensive.js` with the explicit
-`frida-java-bridge` required by Frida 17, starts Server through a forwarded TCP
-port, then compiles a minimal native loader and exercises Gadget on a separate
-port. It cleans up its processes and forwards on exit.
+`frida-java-bridge` required by Frida 17. Server and Gadget each listen on a
+random authenticated abstract-UNIX socket; their host TCP ports exist only as
+ADB forwards and no device TCP listener is exposed. The harness also compiles
+an ABI-matched root probe that scans the mapped agent and Gadget images through
+`/proc/<pid>/mem`, outside Frida's own process view. It cleans up its processes,
+forwards, and remote test directory on exit. The `/proc` gate also rejects
+legacy `linjector` file-descriptor names and a non-zero `TracerPid`.
 
 Frida Gadget configuration must be named next to the library as
 `lib<name>-gadget.config.so`; the harness generates and deploys this file.
@@ -194,6 +220,12 @@ tests/                   Unit, contract, fixture, and workflow tests
 - `--temp-fixes` changes runtime behavior and remains opt-in.
 - Marker absence does not prove resistance to behavioral, integrity, timing, or
   application-specific detection.
+- Stock-client compatibility preserves public ABI/protocol behavior. Active
+  protocol probing and code-integrity checks may still identify instrumentation.
+- This builder does not hide root, automated app launch, Interceptor code
+  changes, user-script strings, or failures reported by remote attestation.
+- The external memory gate scans the mapped agent/Gadget images for its explicit
+  marker set; it is not a general-purpose scan of every anonymous heap page.
 - Frida 17 raw agents need explicit bridge imports or bundling. The harness uses
   `frida.Compiler`; the Frida REPL and tracer provide their own bundled bridges.
 
