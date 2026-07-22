@@ -39,6 +39,61 @@ def test_proc_scan_accepts_no_tracer() -> None:
     android_smoke.assert_clean_proc_text("status", "Name:\ttarget\nTracerPid:\t0\n")
 
 
+def test_proc_scan_rejects_a_tracer_on_any_thread() -> None:
+    statuses = "Name:\tmain\nTracerPid:\t0\nName:\tworker\nTracerPid:\t321\n"
+
+    with pytest.raises(android_smoke.SmokeFailure, match="TracerPid"):
+        android_smoke.assert_clean_proc_text("thread-status", statuses)
+
+
+def test_proc_maps_report_distinguishes_anonymous_rwx_from_art_jit() -> None:
+    report = android_smoke.analyze_proc_maps(
+        """1000-2000 r-xs 00000000 00:01 42 /memfd:jit-cache (deleted)
+2000-3000 rwxp 00000000 00:00 0
+3000-5000 r-xp 00000000 00:01 43 /memfd:jit-code-cache (deleted)
+5000-6000 rw-p 00000000 00:00 0 [anon:scudo:primary]
+"""
+    )
+
+    assert report == {
+        "executable": 3,
+        "rwx": 1,
+        "anonymous_rwx": 1,
+        "deleted_executable": 2,
+        "memfd_executable": 2,
+    }
+
+
+def test_proc_maps_report_treats_named_anon_rwx_as_anonymous() -> None:
+    report = android_smoke.analyze_proc_maps("7000-8000 rwxp 00000000 00:00 0 [anon:gum-code]\n")
+
+    assert report["anonymous_rwx"] == 1
+
+
+def test_thread_status_report_counts_tracers_and_signal_masks() -> None:
+    report = android_smoke.analyze_thread_statuses(
+        """Name:\tmain
+TracerPid:\t0
+SigBlk:\t0000000080001204
+Name:\tworker
+TracerPid:\t42
+SigBlk:\t0000000080005204
+Name:\tworker2
+TracerPid:\t0
+SigBlk:\t0000000080001204
+"""
+    )
+
+    assert report == {
+        "threads": 3,
+        "nonzero_tracer": 1,
+        "sigblk": {
+            "0000000080001204": 2,
+            "0000000080005204": 1,
+        },
+    }
+
+
 @pytest.mark.parametrize(
     "marker",
     [
@@ -63,7 +118,14 @@ def test_proc_scan_uses_portable_single_commands(monkeypatch: pytest.MonkeyPatch
 
     def fake_root_shell(_serial: str, command: str) -> SimpleNamespace:
         commands.append(command)
-        output = clean_memory_scan_output() if "proc-memory-scanner" in command else ""
+        if command.endswith("/maps"):
+            output = "1000-2000 r-xp 00000000 00:01 42 /memfd:jit-code-cache (deleted)\n"
+        elif command.endswith("task/*/status"):
+            output = "Name:\tmain\nTracerPid:\t0\nSigBlk:\t0000000080001204\n"
+        elif "proc-memory-scanner" in command:
+            output = clean_memory_scan_output()
+        else:
+            output = ""
         return SimpleNamespace(stdout=output)
 
     monkeypatch.setattr(android_smoke, "root_shell", fake_root_shell)
@@ -75,17 +137,59 @@ def test_proc_scan_uses_portable_single_commands(monkeypatch: pytest.MonkeyPatch
         "memfd:jit-code-cache",
     )
 
-    assert commands[:5] == [
+    assert commands[:6] == [
         "cat /proc/net/unix",
         "cat /proc/123/maps",
         "ls -l /proc/123/fd",
         "cat /proc/123/status",
         "cat /proc/123/task/*/comm",
+        "cat /proc/123/task/*/status",
     ]
-    assert commands[5].startswith(
+    assert commands[6].startswith(
         "/data/local/tmp/phantom-frida-test/proc-memory-scanner 123 memfd:jit-code-cache"
     )
-    assert report == {"ranges": 7, "executable": 3}
+    assert report == {
+        "ranges": 7,
+        "executable": 3,
+        "maps": {
+            "executable": 1,
+            "rwx": 0,
+            "anonymous_rwx": 0,
+            "deleted_executable": 1,
+            "memfd_executable": 1,
+        },
+        "threads": {
+            "threads": 1,
+            "nonzero_tracer": 0,
+            "sigblk": {"0000000080001204": 1},
+        },
+    }
+
+
+def test_proc_scan_rejects_anonymous_rwx_in_strict_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_root_shell(_serial: str, command: str) -> SimpleNamespace:
+        if command.endswith("/maps"):
+            output = "1000-2000 rwxp 00000000 00:00 0\n"
+        elif command.endswith("task/*/status"):
+            output = "Name:\tmain\nTracerPid:\t0\nSigBlk:\t0000000000000000\n"
+        elif "proc-memory-scanner" in command:
+            output = clean_memory_scan_output()
+        else:
+            output = ""
+        return SimpleNamespace(stdout=output)
+
+    monkeypatch.setattr(android_smoke, "root_shell", fake_root_shell)
+
+    with pytest.raises(android_smoke.SmokeFailure, match="anonymous RWX"):
+        android_smoke._scan_process_procfs(
+            "SERIAL-1",
+            123,
+            "/data/local/tmp/phantom-frida-test/proc-memory-scanner",
+            "memfd:jit-code-cache",
+            require_no_anonymous_rwx=True,
+        )
 
 
 def test_memory_scan_rejects_runtime_signature() -> None:
@@ -461,6 +565,37 @@ def test_host_frida_version_must_match_build_metadata(
 
     with pytest.raises(android_smoke.SmokeFailure, match="version mismatch"):
         android_smoke._load_matching_frida(config)
+
+
+def test_build_metadata_exposes_the_strict_wx_acceptance_gate(tmp_path: Path) -> None:
+    server = tmp_path / "server"
+    gadget = tmp_path / "gadget.so"
+    ndk = tmp_path / "ndk"
+    server.write_bytes(b"server")
+    gadget.write_bytes(b"gadget")
+    ndk.mkdir()
+    (tmp_path / "build-info.json").write_text(
+        '{"frida_version": "17.16.4", "strict_wx": true}',
+        encoding="utf-8",
+    )
+    config = android_smoke.validate_config(
+        server=server,
+        gadget=gadget,
+        name="oemcodec",
+        port=27142,
+        package="com.example.app",
+        ndk=ndk,
+    )
+
+    metadata = android_smoke._load_build_metadata(config)
+
+    assert metadata["frida_version"] == "17.16.4"
+    assert android_smoke._strict_wx_required(metadata) is True
+
+
+def test_strict_wx_metadata_rejects_non_boolean_values() -> None:
+    with pytest.raises(android_smoke.SmokeFailure, match="strict_wx must be boolean"):
+        android_smoke._strict_wx_required({"strict_wx": "true"})
 
 
 def test_agent_is_bundled_with_frida_compiler(
