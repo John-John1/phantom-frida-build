@@ -542,12 +542,24 @@ def test_adb_redacts_serial_from_command_and_failure(
 def test_cleanup_removes_remote_test_directory(monkeypatch: pytest.MonkeyPatch) -> None:
     root_commands: list[str] = []
     adb_commands: list[tuple[str, ...]] = []
+    snapshot_calls = 0
 
     def fake_root_shell(_serial: str, command: str, **_kwargs: object) -> SimpleNamespace:
+        nonlocal snapshot_calls
         root_commands.append(command)
+        stdout = ""
+        if "/proc/[0-9]*/exe" in command:
+            snapshot_calls += 1
+            if snapshot_calls == 1:
+                stdout = (
+                    "lrwxrwxrwx root /proc/101/exe -> "
+                    "/data/local/tmp/phantom-frida-test/oemcodec-server\n"
+                    "lrwxrwxrwx root /proc/102/exe -> "
+                    "/data/local/tmp/phantom-frida-test/gadget-loader\n"
+                )
         return SimpleNamespace(
             returncode=1 if command.startswith(("pkill", "pgrep")) else 0,
-            stdout="",
+            stdout=stdout,
             stderr="",
         )
 
@@ -557,12 +569,21 @@ def test_cleanup_removes_remote_test_directory(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(android_smoke, "root_shell", fake_root_shell)
     monkeypatch.setattr(android_smoke, "adb", fake_adb)
+    monkeypatch.setattr(android_smoke.time, "sleep", lambda _seconds: None)
     config = SimpleNamespace(name="oemcodec", port=27142)
 
     android_smoke._cleanup(config, "SERIAL-1")
 
-    assert "pkill -TERM -x oemcodec-server" in root_commands
-    assert "pkill -TERM -x gadget-loader" in root_commands
+    term_commands = [command for command in root_commands if "kill -TERM" in command]
+    assert len(term_commands) == 2
+    assert all("readlink /proc/" in command for command in term_commands)
+    assert any(
+        "/data/local/tmp/phantom-frida-test/oemcodec-server" in command for command in term_commands
+    )
+    assert any(
+        "/data/local/tmp/phantom-frida-test/gadget-loader" in command for command in term_commands
+    )
+    assert not any(command.startswith("pkill") for command in root_commands)
     assert "rm -rf -- /data/local/tmp/phantom-frida-test" in root_commands
     assert ("forward", "--list") in adb_commands
 
@@ -594,8 +615,8 @@ def test_cleanup_attempts_every_step_and_reports_failures(
     with pytest.raises(android_smoke.SmokeFailure, match="remove remote test directory"):
         android_smoke._cleanup(config, "SERIAL-1")
 
-    assert len([command for command in root_commands if command.startswith("pkill")]) == 2
-    assert len([command for command in root_commands if command.startswith("pgrep")]) == 2
+    assert len([command for command in root_commands if "/proc/[0-9]*/exe" in command]) == 2
+    assert not any(command.startswith(("pkill", "pgrep")) for command in root_commands)
     assert ("forward", "--remove", "tcp:27142") in adb_commands
     assert ("forward", "--remove", "tcp:27143") in adb_commands
     assert ("forward", "--list") in adb_commands
@@ -650,27 +671,25 @@ def test_cleanup_rejects_lingering_runtime_socket(monkeypatch: pytest.MonkeyPatc
         android_smoke._cleanup(config, "SERIAL-1")
 
 
-def test_cleanup_uses_kernel_comm_limit_for_long_server_name(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root_commands: list[str] = []
+def test_remote_signal_is_scoped_to_exact_long_name_executable() -> None:
+    remote_executable = "/data/local/tmp/phantom-frida-test/abcdefghijklmnopqrst-server"
 
-    def fake_root_shell(_serial: str, command: str, **_kwargs: object) -> SimpleNamespace:
-        root_commands.append(command)
-        return SimpleNamespace(
-            returncode=1 if command.startswith(("pkill", "pgrep")) else 0,
-            stdout="",
-            stderr="",
-        )
+    command = android_smoke._remote_signal_command(remote_executable, 123, "TERM")
 
-    monkeypatch.setattr(android_smoke, "root_shell", fake_root_shell)
-    monkeypatch.setattr(
-        android_smoke,
-        "adb",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    assert "readlink /proc/123/exe" in command
+    assert remote_executable in command
+    assert "kill -TERM 123" in command
+    assert "pkill" not in command
+
+
+def test_parse_remote_processes_excludes_same_basename_outside_test_directory() -> None:
+    remote_executable = "/data/local/tmp/phantom-frida-test/oemcodec-server"
+    output = (
+        f"lrwxrwxrwx root /proc/101/exe -> {remote_executable}\n"
+        f"lrwxrwxrwx root /proc/102/exe -> {remote_executable} (deleted)\n"
+        "lrwxrwxrwx root /proc/103/exe -> /other/path/oemcodec-server\n"
     )
-    config = SimpleNamespace(name="abcdefghijklmnopqrst", port=27142)
 
-    android_smoke._cleanup(config, "SERIAL-1")
-
-    assert "pkill -TERM -x abcdefghijklmno" in root_commands
+    assert android_smoke._parse_remote_processes(output, (remote_executable,)) == {
+        remote_executable: [101, 102]
+    }

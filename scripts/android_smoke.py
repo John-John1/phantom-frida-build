@@ -655,47 +655,83 @@ def _exercise_gadget(
     }
 
 
+def _parse_remote_processes(output: str, remote_executables: Sequence[str]) -> dict[str, list[int]]:
+    matches: dict[str, list[int]] = {path: [] for path in remote_executables}
+    for line in output.splitlines():
+        match = re.search(r"/proc/(\d+)/exe -> (.+)$", line)
+        if match is None:
+            continue
+        target = match.group(2).removesuffix(" (deleted)")
+        if target in matches:
+            matches[target].append(int(match.group(1)))
+    return matches
+
+
+def _remote_signal_command(remote_executable: str, pid: int, signal: str) -> str:
+    body = (
+        f"target=$(readlink /proc/{pid}/exe 2>/dev/null) || exit 0; "
+        f'case "$target" in "{remote_executable}"|"{remote_executable} (deleted)") '
+        f"kill -{signal} {pid} || exit 1 ;; esac; exit 0"
+    )
+    return f"'{body}'"
+
+
 def _cleanup(config: AndroidSmokeConfig, serial: str) -> None:
     processes = (
-        (f"{config.name}-server", f"{config.name}-server"[:15]),
-        ("gadget-loader", "gadget-loader"),
+        (f"{config.name}-server", f"{REMOTE_DIR}/{config.name}-server"),
+        ("gadget-loader", f"{REMOTE_DIR}/gadget-loader"),
     )
     failures: list[str] = []
-    signaled = False
+    remote_executables = tuple(path for _label, path in processes)
 
-    for label, process_comm in processes:
+    def snapshot(stage: str) -> dict[str, list[int]] | None:
         result = root_shell(
             serial,
-            f"pkill -TERM -x {process_comm}",
+            "'ls -l /proc/[0-9]*/exe 2>/dev/null; exit 0'",
             check=False,
         )
-        signaled = signaled or result.returncode == 0
-        if result.returncode not in (0, 1):
-            failures.append(f"stop {label} (exit {result.returncode})")
+        if result.returncode != 0:
+            failures.append(f"{stage} (exit {result.returncode})")
+            return None
+        return _parse_remote_processes(result.stdout, remote_executables)
 
-    if signaled:
-        time.sleep(0.5)
+    initial = snapshot("list Android smoke processes")
+    if initial is not None:
+        for label, remote_executable in processes:
+            for pid in initial[remote_executable]:
+                result = root_shell(
+                    serial,
+                    _remote_signal_command(remote_executable, pid, "TERM"),
+                    check=False,
+                )
+                if result.returncode != 0:
+                    failures.append(f"stop {label} (exit {result.returncode})")
+        if any(initial.values()):
+            time.sleep(0.5)
 
-    forced: list[tuple[str, str]] = []
-    for label, process_comm in processes:
-        result = root_shell(serial, f"pgrep -x {process_comm}", check=False)
-        if result.returncode == 0:
-            forced.append((label, process_comm))
-            kill_result = root_shell(serial, f"pkill -KILL -x {process_comm}", check=False)
-            if kill_result.returncode not in (0, 1):
-                failures.append(f"force-stop {label} (exit {kill_result.returncode})")
-        elif result.returncode != 1:
-            failures.append(f"verify {label} (exit {result.returncode})")
+    remaining = snapshot("verify Android smoke processes")
+    forced_labels: list[str] = []
+    if remaining is not None:
+        for label, remote_executable in processes:
+            for pid in remaining[remote_executable]:
+                if label not in forced_labels:
+                    forced_labels.append(label)
+                result = root_shell(
+                    serial,
+                    _remote_signal_command(remote_executable, pid, "KILL"),
+                    check=False,
+                )
+                if result.returncode != 0:
+                    failures.append(f"force-stop {label} (exit {result.returncode})")
 
-    if forced:
-        failures.append("processes did not stop gracefully: " + ", ".join(x[0] for x in forced))
+    if forced_labels:
+        failures.append("processes did not stop gracefully: " + ", ".join(forced_labels))
         time.sleep(0.2)
-        for label, process_comm in forced:
-            result = root_shell(serial, f"pgrep -x {process_comm}", check=False)
-            if result.returncode == 0:
-                failures.append(f"process remains: {label}")
-            elif result.returncode != 1:
-                failures.append(f"verify {label} after SIGKILL (exit {result.returncode})")
+        final = snapshot("verify Android smoke processes after SIGKILL")
+        if final is not None:
+            for label, remote_executable in processes:
+                if final[remote_executable]:
+                    failures.append(f"process remains: {label}")
 
     remove_result = root_shell(serial, f"rm -rf -- {REMOTE_DIR}", check=False)
     if remove_result.returncode != 0:
