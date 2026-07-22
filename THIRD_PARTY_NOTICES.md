@@ -6,7 +6,7 @@ dependencies.
 
 Build outputs contain Frida and its bundled dependencies. Frida's license text
 for the supported upstream target is available in
-[`COPYING` at tag 17.16.3](https://github.com/frida/frida/blob/17.16.3/COPYING).
+[`COPYING` at tag 17.16.4](https://github.com/frida/frida/blob/17.16.4/COPYING).
 Additional notices may be present in the exact upstream source tree and its
 submodules; distributors are responsible for reviewing and preserving them.
 

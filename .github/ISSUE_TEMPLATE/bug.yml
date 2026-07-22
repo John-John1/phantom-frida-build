@@ -15,7 +15,7 @@ body:
     attributes:
       label: Frida version
       description: Use the exact semantic version from build-info.json.
-      placeholder: 17.16.3
+      placeholder: 17.16.4
     validations:
       required: true
 

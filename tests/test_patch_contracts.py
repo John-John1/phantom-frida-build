@@ -5,7 +5,7 @@ import pytest
 import build
 from patches import get_source_patches
 
-FIXTURE_DIR = Path("tests/fixtures/frida-17.16.3")
+FIXTURE_DIR = Path("tests/fixtures/frida-17.16.4")
 
 
 def apply_text_patches(text: str, name: str) -> str:

@@ -3,13 +3,13 @@
 Custom Frida Builder — build anti-detection Frida server from source.
 
 Extended beyond ajeossida with additional stealth techniques.
-Compatibility target: Frida 17.16.3.
+Compatibility target: Frida 17.16.4.
 
 Usage (run in WSL Ubuntu):
-    python3 build.py --version 17.16.3
-    python3 build.py --version 17.16.3 --name stealth --port 27142
-    python3 build.py --version 17.16.3 --arch android-arm64,android-arm --extended
-    python3 build.py --version 17.16.3 --skip-build  # only patch, don't compile
+    python3 build.py --version 17.16.4
+    python3 build.py --version 17.16.4 --name stealth --port 27142
+    python3 build.py --version 17.16.4 --arch android-arm64,android-arm --extended
+    python3 build.py --version 17.16.4 --skip-build  # only patch, don't compile
 
 Requirements:
     - Ubuntu 22.04+ (WSL works)
@@ -148,7 +148,7 @@ def run(
 
 
 def validate_version(value: str) -> str:
-    """Accept only concrete Frida release tags such as 17.16.3."""
+    """Accept only concrete Frida release tags such as 17.16.4."""
     if VERSION_PATTERN.fullmatch(value) is None:
         raise BuildError("Frida version must use the numeric X.Y.Z release format")
     return value
@@ -1349,11 +1349,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3 build.py --version 17.16.3
-  python3 build.py --version 17.16.3 --name stealth --port 27142
-  python3 build.py --version 17.16.3 --arch android-arm64,android-arm --extended
-  python3 build.py --version 17.16.3 --skip-build  # patch only, no compilation
-  python3 build.py --version 17.16.3 --temp-fixes  # add stability patches
+  python3 build.py --version 17.16.4
+  python3 build.py --version 17.16.4 --name stealth --port 27142
+  python3 build.py --version 17.16.4 --arch android-arm64,android-arm --extended
+  python3 build.py --version 17.16.4 --skip-build  # patch only, no compilation
+  python3 build.py --version 17.16.4 --temp-fixes  # add stability patches
 
 Transformations and verification boundaries:
 """
@@ -1361,7 +1361,7 @@ Transformations and verification boundaries:
     )
 
     parser.add_argument(
-        "--version", "-v", required=True, help="Frida version to build (e.g. 17.16.3)"
+        "--version", "-v", required=True, help="Frida version to build (e.g. 17.16.4)"
     )
     parser.add_argument(
         "--arch",

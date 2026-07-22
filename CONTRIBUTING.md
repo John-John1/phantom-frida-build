@@ -38,8 +38,8 @@ Changes to `build.py` or `patches.py` also require a clean, full build of the
 documented target:
 
 ```bash
-python3 build.py --version 17.16.3 --name oemcodec \
-  --arch android-arm64 --port 27142 --extended --verify
+python3 build.py --version 17.16.4 --name oemcodec \
+  --arch android-arm64 --port 27142 --extended --strict-wx --verify
 ```
 
 Record the exact builder and upstream commits from `output/build-info.json`.
@@ -53,8 +53,8 @@ against an application and device you are authorized to test:
 
 ```bash
 python3 scripts/android_smoke.py \
-  --server output/oemcodec-server-17.16.3-android-arm64 \
-  --gadget output/oemcodec-gadget-17.16.3-android-arm64.so \
+  --server output/oemcodec-server-17.16.4-android-arm64 \
+  --gadget output/oemcodec-gadget-17.16.4-android-arm64.so \
   --name oemcodec --port 27142 --package com.example.app \
   --ndk build/android-ndk-r29 \
   --report android-smoke-report.json

@@ -108,8 +108,8 @@ def test_verified_release_builds_and_checks_strict_wx_artifacts() -> None:
 
 def test_scheduled_release_is_pinned_to_the_device_verified_version() -> None:
     text = workflow_text("scheduled-build.yml")
-    assert "inputs.frida_version || '17.16.3'" in text
-    assert 'if [[ "$version" != "17.16.3" ]]' in text
+    assert "inputs.frida_version || '17.16.4'" in text
+    assert 'if [[ "$version" != "17.16.4" ]]' in text
     assert "releases/latest" not in text
 
 

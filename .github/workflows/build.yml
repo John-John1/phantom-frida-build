@@ -7,7 +7,7 @@ on:
         description: Frida version
         required: false
         type: string
-        default: "17.16.3"
+        default: "17.16.4"
       custom_name:
         description: Replacement for the internal Frida name
         required: false
@@ -44,7 +44,7 @@ on:
         description: Frida version
         required: true
         type: string
-        default: "17.16.3"
+        default: "17.16.4"
       custom_name:
         description: Replacement for the internal Frida name
         required: true

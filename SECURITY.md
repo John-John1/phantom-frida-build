@@ -2,7 +2,7 @@
 
 ## Supported scope
 
-Security fixes are applied to the builder on the default branch. Frida 17.16.3
+Security fixes are applied to the builder on the default branch. Frida 17.16.4
 is the current compatibility and verification target. Other upstream versions
 are not considered supported until their source contracts, full build, and
 rooted-device acceptance have been repeated.

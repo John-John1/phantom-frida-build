@@ -1,7 +1,7 @@
 """
 Patch definitions for Custom Frida Builder.
 
-Compatibility target: Frida 17.16.3 source code.
+Compatibility target: Frida 17.16.4 source code.
 Extended beyond ajeossida with additional anti-detection techniques.
 
 Patch categories:
@@ -9,7 +9,7 @@ Patch categories:
   [E] Extended               — new techniques not in ajeossida
   [V] Version-specific       — differs between Frida 16.x and 17.x
 
-Source verification notes (17.16.3):
+Source verification notes (17.16.4):
   - g_set_prgname("frida") does NOT exist — removed
   - Gadget worker names are frida-gadget, frida-gadget-tcp-%u, and frida-gadget-unix
   - memfd_create is in lib/base/linux.vala, NOT frida-helper-backend.vala
@@ -313,7 +313,7 @@ def get_rollback_patches(name: str) -> list[tuple[str, str]]:
 def get_targeted_patches(name: str, cap_name: str, target: str) -> list[tuple[str, str]]:
     """
     Patches for specific build system files.
-    Verified against Frida 17.16.3 meson.build files.
+    Verified against Frida 17.16.4 meson.build files.
     """
     if target == "server_meson":
         # subprojects/frida-core/server/meson.build
@@ -322,13 +322,13 @@ def get_targeted_patches(name: str, cap_name: str, target: str) -> list[tuple[st
             ("'frida-server'", f"'{name}-server'"),
             ('"frida-server"', f'"{name}-server"'),
             ("'frida-server-universal'", f"'{name}-server-universal'"),
-            # 17.16.3: server_name variable
+            # 17.16.4: server_name variable
             ("server_name = 'frida-server'", f"server_name = '{name}-server'"),
         ]
 
     elif target == "compat_build":
         # subprojects/frida-core/compat/build.py
-        # 17.16.3 uses constants: SERVER_TARGET, GADGET_TARGET, and Path references
+        # 17.16.4 uses constants: SERVER_TARGET, GADGET_TARGET, and Path references
         return [
             ('SERVER_TARGET = "frida-server"', f'SERVER_TARGET = "{name}-server"'),
             ('Path("server") / "frida-server"', f'Path("server") / "{name}-server"'),
@@ -343,7 +343,7 @@ def get_targeted_patches(name: str, cap_name: str, target: str) -> list[tuple[st
 
     elif target == "core_meson":
         # subprojects/frida-core/meson.build
-        # 17.16.3: defines helper_name, agent_name, gadget_name
+        # 17.16.4: defines helper_name, agent_name, gadget_name
         return [
             ("helper_name = 'frida-helper'", f"helper_name = '{name}-helper'"),
             ("agent_name = 'frida-agent'", f"agent_name = '{name}-agent'"),
@@ -352,7 +352,7 @@ def get_targeted_patches(name: str, cap_name: str, target: str) -> list[tuple[st
             ("'FRIDA_AGENT_PATH'", f"'{name.upper()}_AGENT_PATH'"),
             # Asset directory
             ("get_option('libdir') / 'frida'", f"get_option('libdir') / '{name}'"),
-            # Gadget modulated (17.16.3 has this only in gadget meson)
+            # Gadget modulated (17.16.4 has this only in gadget meson)
             ('"frida-gadget"', f'"{name}-gadget"'),
             ("frida-gadget-modulated", f"{name}-gadget-modulated"),
             ("libfrida-gadget-modulated", f"lib{name}-gadget-modulated"),
@@ -360,7 +360,7 @@ def get_targeted_patches(name: str, cap_name: str, target: str) -> list[tuple[st
 
     elif target == "gadget_meson":
         # subprojects/frida-core/lib/gadget/meson.build
-        # Verified exact lines from 17.16.3
+        # Verified exact lines from 17.16.4
         # NOTE: do NOT rename vala_header — it's a build-time artifact,
         # and C glue files #include it by the original name
         return [
@@ -416,7 +416,7 @@ MEMFD_PATCHES = {
 def SELINUX_PATCHES(name: str) -> list[tuple[str, str]]:
     """
     SELinux security context labels.
-    Verified in 17.16.3: located in src/linux/linjector.vala
+    Verified in 17.16.4: located in src/linux/linjector.vala
     Three occurrences: adjust_directory_permissions, adjust_file_permissions, adjust_fd_permissions
     """
     return [
@@ -592,7 +592,7 @@ def get_stability_patches_17(frida_dir: Path) -> list[dict]:
                 "Skip perfetto_hprof_ thread during enumeration (prevents SEGV on some devices)"
             ),
             "file": "subprojects/frida-gum/gum/backend-linux/gumprocess-linux.c",
-            # Verified 17.16.3: variable is entry->name, NOT details.name
+            # Verified 17.16.4: variable is entry->name, NOT details.name
             "old": "    carry_on = func (entry, user_data);",
             "new": (
                 '    if (entry->name != NULL && strcmp (entry->name, "perfetto_hprof_") == 0)\n'
