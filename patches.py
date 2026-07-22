@@ -194,6 +194,16 @@ def get_required_file_patches(name: str) -> list[RequiredFilePatch]:
             f'"{name}-main-loop"',
         ),
         RequiredFilePatch(
+            "subprojects/frida-core/src/host-session-service.vala",
+            "Process with pid %u either refused to load frida-agent, ",
+            f"Process with pid %u either refused to load {name}-agent, ",
+        ),
+        RequiredFilePatch(
+            "subprojects/frida-gum/bindings/gumjs/guminspectorserver.c",
+            '"Frida/v" FRIDA_VERSION',
+            f'"{cap_name}/v" FRIDA_VERSION',
+        ),
+        RequiredFilePatch(
             "subprojects/frida-core/lib/base/socket.vala",
             '"Frida/',
             f'"{cap_name}/',

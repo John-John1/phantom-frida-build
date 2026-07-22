@@ -114,6 +114,14 @@ def make_core_fixture(tmp_path: Path) -> Path:
         "subprojects/frida-core/src/frida-glue.c": (
             'main_thread = g_thread_new ("frida-main-loop", run_main_loop, NULL);\n'
         ),
+        "subprojects/frida-core/src/host-session-service.vala": (
+            'e = new Error.PROCESS_NOT_RESPONDING ("Process with pid %u either refused to load '
+            'frida-agent, " +\n'
+            '    "or terminated during injection", pid);\n'
+        ),
+        "subprojects/frida-gum/bindings/gumjs/guminspectorserver.c": (
+            'json_builder_add_string_value (builder, "Frida/v" FRIDA_VERSION);\n'
+        ),
         "subprojects/frida-core/lib/payload/portal-client.vala": (
             'throw new Error.NOT_SUPPORTED ("unsupported by frida-gadget");\n'
         ),
@@ -188,6 +196,7 @@ def test_required_patches_remove_runtime_rpc_branding_and_thread_markers(tmp_pat
     )
     for marker in (
         "frida:rpc",
+        "frida-agent",
         "frida-gadget",
         "frida-eternal-agent",
         "frida-generate-certificate",
