@@ -90,6 +90,7 @@ jobs:
       port: ${{ needs.resolve.outputs.port }}
       extended: true
       temp_fixes: false
+      strict_wx: true
 
   release:
     name: attest and release
@@ -135,6 +136,7 @@ jobs:
               "name": sys.argv[2],
               "port": int(sys.argv[3]),
               "architectures": sys.argv[4].split(","),
+              "strict_wx": True,
           }
           actual = {key: info.get(key) for key in expected}
           if actual != expected:
@@ -159,6 +161,7 @@ jobs:
             echo "- Custom name: ${CUSTOM_NAME}"
             echo "- Custom port: ${CUSTOM_PORT}"
             echo "- Architectures: ${ARCHITECTURES}"
+            echo '- Strict W^X: enabled'
             echo "- Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             echo
             echo "Verify the downloaded files with \`sha256sum --check SHA256SUMS\`."
@@ -178,4 +181,5 @@ jobs:
             echo "- Custom name: ${CUSTOM_NAME}"
             echo "- Custom port: ${CUSTOM_PORT}"
             echo "- Architectures: ${ARCHITECTURES}"
+            echo '- Strict W^X: enabled'
           } >> "$GITHUB_STEP_SUMMARY"

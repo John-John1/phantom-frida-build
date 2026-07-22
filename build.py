@@ -1277,6 +1277,7 @@ def create_build_info(
     port: int | None,
     version: str,
     architectures: list[str],
+    strict_wx: bool = False,
 ) -> dict[str, object]:
     """Create release provenance for the builder and upstream source revisions."""
     repository = os.environ.get("GITHUB_REPOSITORY")
@@ -1294,6 +1295,7 @@ def create_build_info(
         "name": name,
         "ndk_version": NDK_VERSION,
         "port": port or 27042,
+        "strict_wx": strict_wx,
         "workflow_url": workflow_url,
     }
 
@@ -1307,6 +1309,7 @@ def write_release_assets(
     port: int | None,
     version: str,
     architectures: list[str],
+    strict_wx: bool = False,
 ) -> tuple[Path, Path]:
     """Write deterministic metadata JSON and checksums for release artifacts."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1319,6 +1322,7 @@ def write_release_assets(
         port=port,
         version=version,
         architectures=architectures,
+        strict_wx=strict_wx,
     )
     info_path.write_text(
         json.dumps(info, indent=2, sort_keys=True) + "\n",
@@ -1534,6 +1538,7 @@ Transformations and verification boundaries:
             port=port,
             version=version,
             architectures=archs,
+            strict_wx=args.strict_wx,
         )
 
     # Done

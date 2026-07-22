@@ -23,6 +23,7 @@ def test_release_assets_record_revisions_and_checksums(
         port=27142,
         version="17.16.3",
         architectures=["android-arm64"],
+        strict_wx=True,
     )
 
     info = json.loads(info_path.read_text(encoding="utf-8"))
@@ -31,6 +32,7 @@ def test_release_assets_record_revisions_and_checksums(
     assert info["frida_core_commit"] == "core-sha"
     assert info["ndk_version"] == "r29"
     assert info["port"] == 27142
+    assert info["strict_wx"] is True
     assert hashlib.sha256(b"artifact").hexdigest() in sums_path.read_text(encoding="utf-8")
 
 
