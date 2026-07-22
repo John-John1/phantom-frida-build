@@ -1,3 +1,5 @@
+import gzip
+import struct
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6,12 +8,88 @@ import pytest
 import build
 
 
+def make_elf64_with_alloc_and_debug_sections(alloc: bytes, debug: bytes) -> bytes:
+    alloc_offset = 0x100
+    debug_offset = 0x200
+    section_table_offset = 0x300
+    section_header_size = 64
+    data = bytearray(section_table_offset + (3 * section_header_size))
+    data[:16] = b"\x7fELF\x02\x01\x01" + (b"\0" * 9)
+    struct.pack_into("<Q", data, 0x28, section_table_offset)
+    struct.pack_into("<H", data, 0x3A, section_header_size)
+    struct.pack_into("<H", data, 0x3C, 3)
+    data[alloc_offset : alloc_offset + len(alloc)] = alloc
+    data[debug_offset : debug_offset + len(debug)] = debug
+    struct.pack_into(
+        "<IIQQQQIIQQ",
+        data,
+        section_table_offset + section_header_size,
+        0,
+        1,
+        2,
+        0,
+        alloc_offset,
+        len(alloc),
+        0,
+        0,
+        1,
+        0,
+    )
+    struct.pack_into(
+        "<IIQQQQIIQQ",
+        data,
+        section_table_offset + (2 * section_header_size),
+        0,
+        1,
+        0,
+        0,
+        debug_offset,
+        len(debug),
+        0,
+        0,
+        1,
+        0,
+    )
+    return bytes(data)
+
+
 def test_verify_binary_rejects_known_runtime_markers(tmp_path: Path) -> None:
     binary = tmp_path / "server"
     binary.write_bytes(b"prefix\x00/frida-zymbiote-123\x00re/frida/HelperBackend\x00")
 
     with pytest.raises(build.BuildError, match="frida-zymbiote"):
         build.verify_binary(binary)
+
+
+def test_verify_binary_rejects_modern_memory_and_thread_markers(tmp_path: Path) -> None:
+    binary = tmp_path / "server"
+    binary.write_bytes(
+        b"FridaScriptEngine\0GLib-GIO\0GDBusProxy\0GumScript\0frida:rpc\0"
+        b"frida-gadget\0frida-eternal-agent\0frida-main-loop\0Frida/17.16.3\0"
+    )
+
+    with pytest.raises(build.BuildError, match="FridaScriptEngine"):
+        build.verify_binary(binary)
+
+
+def test_verify_binary_allows_required_stock_protocol_identifiers(tmp_path: Path) -> None:
+    binary = tmp_path / "server"
+    binary.write_bytes(b"Frida\0re.frida.HostSession\0re.frida.GadgetSession\0")
+
+    build.verify_binary(binary)
+
+
+def test_binary_memory_patches_only_touch_runtime_alloc_sections(tmp_path: Path) -> None:
+    markers = b"FridaScriptEngine\0GLib-GIO\0GDBusProxy\0GumScript\0"
+    binary = tmp_path / "agent.so"
+    binary.write_bytes(make_elf64_with_alloc_and_debug_sections(markers, markers))
+
+    build.apply_binary_patches(binary, "oemcodec", extended=True)
+
+    patched = binary.read_bytes()
+    assert markers not in patched[0x100 : 0x100 + len(markers)]
+    assert patched[0x200 : 0x200 + len(markers)] == markers
+    assert len(patched) == len(make_elf64_with_alloc_and_debug_sections(markers, markers))
 
 
 def test_collect_artifacts_requires_server_and_gadget(tmp_path: Path) -> None:
@@ -69,6 +147,60 @@ def test_collect_artifacts_returns_only_verified_staged_outputs(tmp_path: Path) 
         "oemcodec-gadget-17.16.3-android-arm64.so.gz",
     }
     assert not list(output_dir.glob(".staging-*"))
+
+
+def test_strip_binary_uses_llvm_strip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    binary = tmp_path / "gadget.so"
+    binary.write_bytes(b"gadget")
+    strip_tool = tmp_path / "llvm-strip"
+    commands: list[list[object]] = []
+    monkeypatch.setattr(
+        build,
+        "run",
+        lambda command, **_kwargs: commands.append(list(command)),
+    )
+
+    build.strip_binary(binary, strip_tool)
+
+    assert commands == [[strip_tool, "--strip-unneeded", binary]]
+
+
+def test_collect_artifacts_strips_only_staged_gadget_before_compression(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core_build = tmp_path / "build/subprojects/frida-core"
+    server_dir = core_build / "server"
+    gadget_dir = core_build / "lib/gadget"
+    server_dir.mkdir(parents=True)
+    gadget_dir.mkdir(parents=True)
+    server_source = server_dir / "oemcodec-server"
+    gadget_source = gadget_dir / "liboemcodec-gadget.so"
+    server_source.write_bytes(b"clean-server")
+    gadget_source.write_bytes(b"unstripped-gadget")
+    stripped: list[Path] = []
+
+    def fake_strip(binary: Path, _tool: Path) -> None:
+        stripped.append(binary)
+        binary.write_bytes(b"stripped-gadget")
+
+    monkeypatch.setattr(build, "strip_binary", fake_strip)
+    output_dir = tmp_path / "stage"
+
+    build.collect_artifacts(
+        tmp_path,
+        "android-arm64",
+        "oemcodec",
+        "17.16.3",
+        output_dir,
+        True,
+        strip_tool=tmp_path / "llvm-strip",
+    )
+
+    gadget_output = output_dir / "oemcodec-gadget-17.16.3-android-arm64.so"
+    assert [path.name for path in stripped] == [gadget_output.name]
+    assert gadget_output.read_bytes() == b"stripped-gadget"
+    assert gzip.decompress(gadget_output.with_suffix(".so.gz").read_bytes()) == b"stripped-gadget"
+    assert gadget_source.read_bytes() == b"unstripped-gadget"
 
 
 def test_collect_artifacts_does_not_promote_failed_stage(tmp_path: Path) -> None:

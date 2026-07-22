@@ -42,6 +42,7 @@ from patches import (
     get_binary_patches,
     get_binary_string_patches,
     get_internal_patches,
+    get_memory_signature_patches,
     get_port_patches,
     get_required_file_patches,
     get_rollback_patches,
@@ -70,6 +71,23 @@ FORBIDDEN_BINARY_MARKERS = (
     b"re/frida/HelperBackend",
     b"frida-server",
     b"frida-helper",
+    b"frida-agent",
+    b"frida-gadget",
+    b"frida-eternal-agent",
+    b"frida-generate-certificate",
+    b"frida-main-loop",
+    b"frida:rpc",
+    b"FridaScriptEngine",
+    b"GLib-GIO",
+    b"GDBusProxy",
+    b"GumScript",
+    b"Frida/",
+    b"gum-js-loop",
+    b"gmain\x00",
+    b"gdbus\x00",
+    b"pool-frida",
+    b"pool-spawner",
+    b"jit-cache\x00",
 )
 ZYMBIOTE_ARCHITECTURES = ("arm", "arm64", "x86", "x86_64")
 ZYMBIOTE_SOCKET_FIELD_SIZE = 64
@@ -341,6 +359,22 @@ def validate_ndk(ndk_dir: Path) -> Path:
         )
         raise BuildError(f"NDK revision mismatch: expected {NDK_REVISION}, found {actual}")
     return ndk_dir
+
+
+def find_llvm_strip(ndk_dir: Path) -> Path:
+    """Locate the host llvm-strip shipped with the validated Android NDK."""
+    candidates = sorted(
+        candidate
+        for prebuilt in (ndk_dir / "toolchains" / "llvm" / "prebuilt").glob("*")
+        for candidate in (
+            prebuilt / "bin" / "llvm-strip",
+            prebuilt / "bin" / "llvm-strip.exe",
+        )
+        if candidate.is_file()
+    )
+    if not candidates:
+        raise BuildError(f"NDK llvm-strip is missing under {ndk_dir}")
+    return candidates[0]
 
 
 def verify_file_checksum(path: Path, expected: str, algorithm: str) -> None:
@@ -701,7 +735,7 @@ def apply_targeted_patches(frida_dir: Path, custom_name: str, frida_major: int):
     if memfd_file.exists():
         count = replace_in_file(memfd_file, memfd_cfg["old"], memfd_cfg["new"])
         if count:
-            log(f"  memfd_create -> 'jit-cache' in {memfd_cfg['file']}", "OK")
+            log(f"  memfd_create -> 'jit-code-cache' in {memfd_cfg['file']}", "OK")
         else:
             log(f"  memfd_create: pattern not found in {memfd_cfg['file']}", "WARN")
     else:
@@ -869,25 +903,86 @@ def find_dex_regions(data: bytes) -> list[tuple[int, int]]:
     return regions
 
 
-def replace_bytes_outside_regions(
-    data: bytes, old: bytes, new: bytes, skip_regions: list[tuple[int, int]]
+def find_elf_alloc_regions(data: bytes) -> list[tuple[int, int]]:
+    """Return file ranges for ELF SHF_ALLOC sections, or the full range for non-ELF data."""
+    if not data.startswith(b"\x7fELF"):
+        return [(0, len(data))]
+    if len(data) < 64:
+        raise BuildError("ELF header is truncated")
+    if data[5] != 1:
+        raise BuildError("Only little-endian ELF artifacts are supported")
+
+    elf_class = data[4]
+    if elf_class == 2:
+        section_table_offset = struct.unpack_from("<Q", data, 0x28)[0]
+        section_header_size = struct.unpack_from("<H", data, 0x3A)[0]
+        section_count = struct.unpack_from("<H", data, 0x3C)[0]
+        minimum_section_header_size = 64
+        flags_offset, flags_format = 8, "<Q"
+        file_offset_offset, size_offset, value_format = 24, 32, "<Q"
+    elif elf_class == 1:
+        section_table_offset = struct.unpack_from("<I", data, 0x20)[0]
+        section_header_size = struct.unpack_from("<H", data, 0x2E)[0]
+        section_count = struct.unpack_from("<H", data, 0x30)[0]
+        minimum_section_header_size = 40
+        flags_offset, flags_format = 8, "<I"
+        file_offset_offset, size_offset, value_format = 16, 20, "<I"
+    else:
+        raise BuildError(f"Unsupported ELF class: {elf_class}")
+
+    if section_table_offset == 0 or section_header_size < minimum_section_header_size:
+        raise BuildError("ELF section table is missing or invalid")
+    if section_table_offset + section_header_size > len(data):
+        raise BuildError("ELF section table starts outside the artifact")
+    if section_count == 0:
+        section_count = int(
+            struct.unpack_from(value_format, data, section_table_offset + size_offset)[0]
+        )
+    if section_count == 0:
+        raise BuildError("ELF contains no section headers")
+    if section_table_offset + (section_count * section_header_size) > len(data):
+        raise BuildError("ELF section table extends outside the artifact")
+
+    regions = []
+    for index in range(section_count):
+        header = section_table_offset + (index * section_header_size)
+        section_type = struct.unpack_from("<I", data, header + 4)[0]
+        flags = struct.unpack_from(flags_format, data, header + flags_offset)[0]
+        file_offset = int(struct.unpack_from(value_format, data, header + file_offset_offset)[0])
+        size = int(struct.unpack_from(value_format, data, header + size_offset)[0])
+        if flags & 0x2 == 0 or section_type == 8 or size == 0:
+            continue
+        if file_offset + size > len(data):
+            raise BuildError(f"ELF allocated section {index} extends outside the artifact")
+        regions.append((file_offset, file_offset + size))
+    if not regions:
+        raise BuildError("ELF contains no file-backed SHF_ALLOC sections")
+    return regions
+
+
+def replace_bytes_in_regions(
+    data: bytes,
+    old: bytes,
+    new: bytes,
+    include_regions: list[tuple[int, int]],
+    skip_regions: list[tuple[int, int]],
 ) -> tuple[bytes, int]:
-    """Replace byte pattern in data, skipping protected regions.
-    Returns (modified_data, replacement_count)."""
+    """Replace a same-length pattern only inside included, non-protected file ranges."""
     assert len(old) == len(new), "Replacement must be same length"
     result = bytearray(data)
     count = 0
-    idx = 0
+    offset = 0
     while True:
-        pos = data.find(old, idx)
-        if pos == -1:
+        position = data.find(old, offset)
+        if position == -1:
             break
-        # Check if this position falls inside any protected region
-        in_protected = any(start <= pos < end for start, end in skip_regions)
-        if not in_protected:
-            result[pos : pos + len(new)] = new
+        end = position + len(old)
+        included = any(start <= position and end <= stop for start, stop in include_regions)
+        protected = any(start <= position < stop for start, stop in skip_regions)
+        if included and not protected:
+            result[position:end] = new
             count += 1
-        idx = pos + 1
+        offset = position + 1
     return bytes(result), count
 
 
@@ -898,17 +993,20 @@ def apply_binary_patches(binary_path: Path, custom_name: str, extended: bool = F
     original_size = len(data)
     patched = False
 
-    # Find embedded DEX regions to protect
-    dex_regions = find_dex_regions(data) if extended else []
+    alloc_regions = find_elf_alloc_regions(data)
+    dex_regions = find_dex_regions(data)
 
-    # Standard thread name patches (safe — these patterns don't appear in DEX)
-    for old_hex, new_hex, description in get_binary_patches():
+    runtime_patches = [*get_memory_signature_patches(custom_name), *get_binary_patches()]
+    for old_hex, new_hex, description in runtime_patches:
         old_bytes = bytes.fromhex(old_hex)
         new_bytes = bytes.fromhex(new_hex)
         if old_bytes in data:
-            data = data.replace(old_bytes, new_bytes)
-            log(f"    {description}", "OK")
-            patched = True
+            data, count = replace_bytes_in_regions(
+                data, old_bytes, new_bytes, alloc_regions, dex_regions
+            )
+            if count:
+                log(f"    {description} ({count}x in SHF_ALLOC)", "OK")
+                patched = True
 
     # Extended: sweep for residual "frida" strings in binary
     # MUST skip DEX regions to avoid corrupting embedded helper DEX
@@ -917,13 +1015,9 @@ def apply_binary_patches(binary_path: Path, custom_name: str, extended: bool = F
             old_bytes = bytes.fromhex(old_hex)
             new_bytes = bytes.fromhex(new_hex)
             if old_bytes in data:
-                if dex_regions:
-                    data, count = replace_bytes_outside_regions(
-                        data, old_bytes, new_bytes, dex_regions
-                    )
-                else:
-                    count = data.count(old_bytes)
-                    data = data.replace(old_bytes, new_bytes)
+                data, count = replace_bytes_in_regions(
+                    data, old_bytes, new_bytes, alloc_regions, dex_regions
+                )
                 if count:
                     log(f"    [ext] {description} ({count}x, skipped DEX regions)", "OK")
                     patched = True
@@ -955,6 +1049,14 @@ def build_frida(frida_dir: Path, ndk_path: Path):
         cwd=frida_dir,
         env={"ANDROID_NDK_ROOT": str(ndk_path)},
     )
+
+
+def strip_binary(binary_path: Path, strip_tool: Path) -> None:
+    """Remove symbols and non-runtime sections from a staged shared library."""
+    before = binary_path.stat().st_size
+    run([strip_tool, "--strip-unneeded", binary_path])
+    after = binary_path.stat().st_size
+    log(f"    stripped {binary_path.name}: {before:,} -> {after:,} bytes", "OK")
 
 
 # ============================================================================
@@ -995,6 +1097,8 @@ def collect_artifacts(
     version: str,
     output_dir: Path,
     extended: bool,
+    *,
+    strip_tool: Path | None = None,
 ) -> list[Path]:
     """Stage, verify, and promote mandatory build artifacts."""
     log(f"Collecting artifacts for {arch}...", "STEP")
@@ -1015,10 +1119,18 @@ def collect_artifacts(
                     log(f"      {f.name} ({f.stat().st_size:,} bytes)", "INFO")
         return None
 
-    def save_artifact(src: Path, out_name: str, stage_dir: Path) -> list[Path]:
+    def save_artifact(
+        src: Path,
+        out_name: str,
+        stage_dir: Path,
+        *,
+        strip: bool = False,
+    ) -> list[Path]:
         out_bin = stage_dir / out_name
         shutil.copy2(src, out_bin)
         os.chmod(out_bin, 0o755)
+        if strip and strip_tool is not None:
+            strip_binary(out_bin, strip_tool)
 
         out_gz = stage_dir / f"{out_name}.gz"
         with out_bin.open("rb") as source, out_gz.open("wb") as raw_output:
@@ -1092,6 +1204,7 @@ def collect_artifacts(
                 gadget,
                 f"{custom_name}-gadget-{version}-android-{arch_short}.so",
                 stage_dir,
+                strip=True,
             ),
         ]
 
@@ -1351,6 +1464,7 @@ Transformations and verification boundaries:
         return
 
     with output_transaction(output_dir) as staged_output:
+        strip_tool = find_llvm_strip(ndk_path)
         # Step 5: Build loop
         for arch in archs:
             log("=" * 60, "HEADER")
@@ -1379,6 +1493,7 @@ Transformations and verification boundaries:
                 version,
                 staged_output,
                 args.extended,
+                strip_tool=strip_tool,
             )
 
         # Step 6: Verification
