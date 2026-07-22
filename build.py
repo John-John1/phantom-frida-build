@@ -772,16 +772,33 @@ def apply_targeted_patches(frida_dir: Path, custom_name: str, frida_major: int):
 
 def apply_strict_wx_patch(frida_dir: Path) -> None:
     """Use Gum's existing non-RWX allocator path on Android."""
-    relative_path = Path("subprojects/frida-gum/gum/gummemory.c")
-    target = frida_dir / relative_path
-    old = "#if defined (HAVE_DARWIN) && !defined (HAVE_I386)"
-    new = "#if (defined (HAVE_DARWIN) && !defined (HAVE_I386)) || defined (HAVE_ANDROID)"
-    count = replace_in_file(target, old, new)
-    if count != 1:
-        raise BuildError(
-            f"Strict W^X pattern occurred {count} times in {relative_path.as_posix()}; expected 1"
-        )
-    log(f"  [required] {relative_path.as_posix()}: Android RWX disabled", "OK")
+    patches = (
+        (
+            Path("subprojects/frida-gum/gum/gummemory.c"),
+            "#if defined (HAVE_DARWIN) && !defined (HAVE_I386)",
+            "#if (defined (HAVE_DARWIN) && !defined (HAVE_I386)) || defined (HAVE_ANDROID)",
+            "Android RWX disabled",
+        ),
+        (
+            Path("subprojects/frida-gum/gum/backend-linux/gumprocess-linux.c"),
+            '    if (!gum_try_resolve_dynamic_symbol ("exit", &gum_libc_info))\n      return NULL;',
+            "#if defined (HAVE_ANDROID)\n"
+            "    if (dladdr (GUM_FUNCPTR_TO_POINTER (exit), &gum_libc_info) == 0)\n"
+            "#else\n"
+            '    if (!gum_try_resolve_dynamic_symbol ("exit", &gum_libc_info))\n'
+            "#endif\n"
+            "      return NULL;",
+            "Android libc lookup made reentrancy-safe",
+        ),
+    )
+    for relative_path, old, new, description in patches:
+        count = replace_in_file(frida_dir / relative_path, old, new)
+        if count != 1:
+            raise BuildError(
+                f"Strict W^X pattern occurred {count} times in "
+                f"{relative_path.as_posix()}; expected 1"
+            )
+        log(f"  [required] {relative_path.as_posix()}: {description}", "OK")
 
 
 def apply_port_patches(frida_dir: Path, port: int | None) -> None:
