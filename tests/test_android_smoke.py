@@ -561,6 +561,8 @@ def test_cleanup_removes_remote_test_directory(monkeypatch: pytest.MonkeyPatch) 
 
     android_smoke._cleanup(config, "SERIAL-1")
 
+    assert "pkill -TERM -x oemcodec-server" in root_commands
+    assert "pkill -TERM -x gadget-loader" in root_commands
     assert "rm -rf -- /data/local/tmp/phantom-frida-test" in root_commands
     assert ("forward", "--list") in adb_commands
 
@@ -625,3 +627,50 @@ def test_cleanup_rejects_lingering_forward(monkeypatch: pytest.MonkeyPatch) -> N
 
     with pytest.raises(android_smoke.SmokeFailure, match="forward remains"):
         android_smoke._cleanup(config, "SERIAL-1")
+
+
+def test_cleanup_rejects_lingering_runtime_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_root_shell(_serial: str, command: str, **_kwargs: object) -> SimpleNamespace:
+        stdout = "@/oemcodec-zymbiote-deadbeef\n" if command == "cat /proc/net/unix" else ""
+        return SimpleNamespace(
+            returncode=1 if command.startswith(("pkill", "pgrep")) else 0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    monkeypatch.setattr(android_smoke, "root_shell", fake_root_shell)
+    monkeypatch.setattr(
+        android_smoke,
+        "adb",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    config = SimpleNamespace(name="oemcodec", port=27142)
+
+    with pytest.raises(android_smoke.SmokeFailure, match="unix socket remains"):
+        android_smoke._cleanup(config, "SERIAL-1")
+
+
+def test_cleanup_uses_kernel_comm_limit_for_long_server_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_commands: list[str] = []
+
+    def fake_root_shell(_serial: str, command: str, **_kwargs: object) -> SimpleNamespace:
+        root_commands.append(command)
+        return SimpleNamespace(
+            returncode=1 if command.startswith(("pkill", "pgrep")) else 0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(android_smoke, "root_shell", fake_root_shell)
+    monkeypatch.setattr(
+        android_smoke,
+        "adb",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    config = SimpleNamespace(name="abcdefghijklmnopqrst", port=27142)
+
+    android_smoke._cleanup(config, "SERIAL-1")
+
+    assert "pkill -TERM -x abcdefghijklmno" in root_commands

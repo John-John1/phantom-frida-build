@@ -656,19 +656,46 @@ def _exercise_gadget(
 
 
 def _cleanup(config: AndroidSmokeConfig, serial: str) -> None:
-    remote_server = f"{REMOTE_DIR}/{config.name}-server"
-    remote_loader = f"{REMOTE_DIR}/gadget-loader"
-    remote_processes = (remote_server, remote_loader)
+    processes = (
+        (f"{config.name}-server", f"{config.name}-server"[:15]),
+        ("gadget-loader", "gadget-loader"),
+    )
     failures: list[str] = []
+    signaled = False
 
-    for remote_process in remote_processes:
+    for label, process_comm in processes:
         result = root_shell(
             serial,
-            f"pkill -9 -f '^{remote_process}([[:space:]]|$)'",
+            f"pkill -TERM -x {process_comm}",
             check=False,
         )
+        signaled = signaled or result.returncode == 0
         if result.returncode not in (0, 1):
-            failures.append(f"stop {Path(remote_process).name} (exit {result.returncode})")
+            failures.append(f"stop {label} (exit {result.returncode})")
+
+    if signaled:
+        time.sleep(0.5)
+
+    forced: list[tuple[str, str]] = []
+    for label, process_comm in processes:
+        result = root_shell(serial, f"pgrep -x {process_comm}", check=False)
+        if result.returncode == 0:
+            forced.append((label, process_comm))
+            kill_result = root_shell(serial, f"pkill -KILL -x {process_comm}", check=False)
+            if kill_result.returncode not in (0, 1):
+                failures.append(f"force-stop {label} (exit {kill_result.returncode})")
+        elif result.returncode != 1:
+            failures.append(f"verify {label} (exit {result.returncode})")
+
+    if forced:
+        failures.append("processes did not stop gracefully: " + ", ".join(x[0] for x in forced))
+        time.sleep(0.2)
+        for label, process_comm in forced:
+            result = root_shell(serial, f"pgrep -x {process_comm}", check=False)
+            if result.returncode == 0:
+                failures.append(f"process remains: {label}")
+            elif result.returncode != 1:
+                failures.append(f"verify {label} after SIGKILL (exit {result.returncode})")
 
     remove_result = root_shell(serial, f"rm -rf -- {REMOTE_DIR}", check=False)
     if remove_result.returncode != 0:
@@ -677,20 +704,22 @@ def _cleanup(config: AndroidSmokeConfig, serial: str) -> None:
     for port in (config.port, choose_gadget_port(config.port)):
         adb(serial, "forward", "--remove", f"tcp:{port}", check=False)
 
-    for remote_process in remote_processes:
-        result = root_shell(
-            serial,
-            f"pgrep -f '^{remote_process}([[:space:]]|$)'",
-            check=False,
-        )
-        if result.returncode == 0:
-            failures.append(f"process remains: {Path(remote_process).name}")
-        elif result.returncode != 1:
-            failures.append(f"verify {Path(remote_process).name} (exit {result.returncode})")
-
     directory_result = root_shell(serial, f"test ! -e {REMOTE_DIR}", check=False)
     if directory_result.returncode != 0:
         failures.append("remote test directory remains")
+
+    socket_result = root_shell(serial, "cat /proc/net/unix", check=False)
+    if socket_result.returncode != 0:
+        failures.append(f"list unix sockets (exit {socket_result.returncode})")
+    else:
+        socket_markers = (
+            f"@{config.name}-server-",
+            f"@{config.name}-gadget-",
+            f"@/{config.name}-zymbiote-",
+        )
+        for marker in socket_markers:
+            if marker in socket_result.stdout:
+                failures.append(f"unix socket remains: {marker}")
 
     forward_result = adb(serial, "forward", "--list", check=False)
     if forward_result.returncode != 0:
