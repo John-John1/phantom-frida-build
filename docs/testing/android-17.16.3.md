@@ -1,7 +1,7 @@
 # Android acceptance: Frida 17.16.3
 
-Tested on 2026-07-21 with locally built Frida 17.16.3 Android arm64
-artifacts. Their exact hashes are recorded below.
+Tested on 2026-07-22 with CI-built Frida 17.16.3 Android arm64 artifacts.
+Their exact hashes are recorded below.
 
 ## Environment
 
@@ -23,13 +23,17 @@ excluded from Git.
 
 | File | SHA-256 |
 |---|---|
-| `oemcodec-server-17.16.3-android-arm64` | `6ab48cda97ecf307c60b73dfaf7ca8a44146773664c3b0abe63493d2f5730bd9` |
-| `oemcodec-server-17.16.3-android-arm64.gz` | `930121e6716e9fadc5e3da7820b816787885c9594bda6a74fe7ddf98409ff9bf` |
-| `oemcodec-gadget-17.16.3-android-arm64.so` | `def6423cdbfa22c6deb01e0f1e4f9ed532f96f498a403623d46670ff3b4fd4fa` |
-| `oemcodec-gadget-17.16.3-android-arm64.so.gz` | `66efc35d0e70160989d88c58c55f97c5b74bd71bc61a45b2a897c971712e608e` |
+| `oemcodec-server-17.16.3-android-arm64` | `68a359b84eac175e6d1e26dab425f53f859b1e54b2c8d0f1d8447c9df737f379` |
+| `oemcodec-server-17.16.3-android-arm64.gz` | `b93213800986eebd96b2389725be8b961e1606750ef730626092c0fdcb7a7bc7` |
+| `oemcodec-gadget-17.16.3-android-arm64.so` | `40a2a15086e8acc70901ca78a3169a29c43bd1ee7a7d6a115a3448fdcfc46a20` |
+| `oemcodec-gadget-17.16.3-android-arm64.so.gz` | `988b40a88bb4afadeae6661657a92c6c8c795d8714022a38d0eac941f8088ae0` |
 
 `SHA256SUMS` independently verified all four files before the device run. The
 uncompressed server and Gadget were identified as AArch64 ELF artifacts.
+`build-info.json` records builder commit
+`b1a9493aa0b26eea8410474a923c56445836d638`, Frida commit
+`954a1c4280fb4301f25f5b3026b407874c7fe5e4`, and frida-core commit
+`5d714719bc0e7cba171c8dd400d4e0bb17db14b7`.
 
 ## Command
 
@@ -38,8 +42,8 @@ authorized device attached:
 
 ```powershell
 .venv\Scripts\python.exe scripts\android_smoke.py `
-  --server output\oemcodec-server-17.16.3-android-arm64 `
-  --gadget output\oemcodec-gadget-17.16.3-android-arm64.so `
+  --server output-dl\oemcodec-server-17.16.3-android-arm64 `
+  --gadget output-dl\oemcodec-gadget-17.16.3-android-arm64.so `
   --name oemcodec `
   --port 27142 `
   --package com.android.calculator2 `
@@ -56,13 +60,15 @@ used port 27143 for the isolated Gadget check.
 | Check | Result | Evidence |
 |---|---|---|
 | Root precondition | PASS | `su -c id` returned UID 0. |
-| Stock client to Server | PASS | Frida 17.16.3 enumerated 122 processes in the latest run. |
+| Stock client to Server | PASS | Frida 17.16.3 enumerated 153 processes in the latest run. |
 | Spawn, attach, and resume | PASS | The calculator process completed the scripted lifecycle. |
 | Java bridge and hook installation | PASS | `Java.available` was true and the structured agent reported no failures. |
-| `/proc` maps, file descriptors, and thread names | PASS | No forbidden `frida-server`, `frida-helper`, or `frida-zymbiote` marker was found. |
-| Zymbiote socket rename | PASS | A rooted live scan found the custom `oemcodec-zymbiote` socket and no `frida-zymbiote` socket. |
+| Authenticated transport | PASS | Server and Gadget used separate randomized abstract Unix sockets, origins, and tokens; neither exposed a device TCP listener. |
+| `/proc` maps, file descriptors, status, and thread names | PASS | No forbidden runtime/thread marker or `linjector` descriptor was found, and `TracerPid` was zero. |
+| External Server memory scan | PASS | A separate rooted native scanner inspected 9 readable ranges (7 executable); all 14 runtime markers had zero matches. |
 | Stock client to Gadget | PASS | The separately loaded Gadget accepted Frida 17.16.3, attached to its process, loaded a probe script, received its structured result, and detached. |
-| Cleanup | PASS | No test process, ADB forward, or tested socket marker remained after exit. |
+| External Gadget memory scan | PASS | A separate rooted native scanner inspected 9 readable ranges (7 executable); all 14 runtime markers had zero matches. |
+| Cleanup | PASS | Exact executable paths were terminated gracefully; an independent follow-up found no test process, directory, Unix socket, open file, or ADB forward. |
 
 Redacted structured result:
 
@@ -72,13 +78,22 @@ Redacted structured result:
   "gadget": {
     "abi": "arm64-v8a",
     "api_level": 34,
+    "memory": {
+      "executable": 7,
+      "ranges": 9
+    },
     "process_count": 1,
     "script_loaded": true
   },
   "server": {
     "java_available": true,
+    "memory": {
+      "executable": 7,
+      "ranges": 9
+    },
     "script_failures": []
   },
+  "server_process_count": 153,
   "status": "passed"
 }
 ```
