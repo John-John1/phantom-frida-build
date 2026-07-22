@@ -179,7 +179,8 @@ random authenticated abstract-UNIX socket; their host TCP ports exist only as
 ADB forwards and no device TCP listener is exposed. The harness also compiles
 an ABI-matched root probe that scans the mapped agent and Gadget images through
 `/proc/<pid>/mem`, outside Frida's own process view. It cleans up its processes,
-forwards, and remote test directory on exit.
+forwards, and remote test directory on exit. The `/proc` gate also rejects
+legacy `linjector` file-descriptor names and a non-zero `TracerPid`.
 
 Frida Gadget configuration must be named next to the library as
 `lib<name>-gadget.config.so`; the harness generates and deploys this file.
@@ -219,6 +220,10 @@ tests/                   Unit, contract, fixture, and workflow tests
 - `--temp-fixes` changes runtime behavior and remains opt-in.
 - Marker absence does not prove resistance to behavioral, integrity, timing, or
   application-specific detection.
+- Stock-client compatibility preserves public ABI/protocol behavior. Active
+  protocol probing and code-integrity checks may still identify instrumentation.
+- This builder does not hide root, automated app launch, Interceptor code
+  changes, user-script strings, or failures reported by remote attestation.
 - The external memory gate scans the mapped agent/Gadget images for its explicit
   marker set; it is not a general-purpose scan of every anonymous heap page.
 - Frida 17 raw agents need explicit bridge imports or bundling. The harness uses
