@@ -639,6 +639,9 @@ def test_acceptance_agent_uses_frida_17_file_and_java_wrapper_apis() -> None:
     assert "add(left, right)" in source
     assert "Interceptor.attach" in source
     assert "new NativeFunction" in source
+    assert "Stalker.follow" in source
+    assert "Stalker.unfollow" in source
+    assert "Stalker.garbageCollect" in source
 
 
 def test_report_writer_omits_device_serial(tmp_path: Path) -> None:

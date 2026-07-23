@@ -771,32 +771,63 @@ def apply_targeted_patches(frida_dir: Path, custom_name: str, frida_major: int):
 
 
 def apply_strict_wx_patch(frida_dir: Path) -> None:
-    """Use Gum's existing non-RWX allocator path on Android."""
+    """Disable Gum's persistent anonymous RWX code pools on Android."""
+    allocator_boxed_types = (
+        "G_DEFINE_BOXED_TYPE (GumCodeSlice, gum_code_slice, gum_code_slice_ref,\n"
+        "                     gum_code_slice_unref)\n"
+        "G_DEFINE_BOXED_TYPE (GumCodeDeflector, gum_code_deflector,\n"
+        "                     gum_code_deflector_ref, gum_code_deflector_unref)\n\n"
+    )
     patches = (
         (
-            Path("subprojects/frida-gum/gum/gummemory.c"),
-            "#if defined (HAVE_DARWIN) && !defined (HAVE_I386)",
-            "#if (defined (HAVE_DARWIN) && !defined (HAVE_I386)) || defined (HAVE_ANDROID)",
-            "Android RWX disabled",
+            Path("subprojects/frida-gum/gum/gumcodeallocator.c"),
+            "gum_query_is_rwx_supported ()",
+            "gum_code_allocator_is_rwx_supported ()",
+            3,
+            "code pools use RW then RX",
         ),
         (
-            Path("subprojects/frida-gum/gum/backend-linux/gumprocess-linux.c"),
-            '    if (!gum_try_resolve_dynamic_symbol ("exit", &gum_libc_info))\n      return NULL;',
+            Path("subprojects/frida-gum/gum/gumcodeallocator.c"),
+            allocator_boxed_types + "void\ngum_code_allocator_init",
+            allocator_boxed_types + "static gboolean\n"
+            "gum_code_allocator_is_rwx_supported (void)\n"
+            "{\n"
             "#if defined (HAVE_ANDROID)\n"
-            "    if (dladdr (GUM_FUNCPTR_TO_POINTER (exit), &gum_libc_info) == 0)\n"
+            "  return FALSE;\n"
             "#else\n"
-            '    if (!gum_try_resolve_dynamic_symbol ("exit", &gum_libc_info))\n'
+            "  return gum_query_is_rwx_supported ();\n"
             "#endif\n"
-            "      return NULL;",
-            "Android libc lookup made reentrancy-safe",
+            "}\n\n"
+            "void\n"
+            "gum_code_allocator_init",
+            1,
+            "Android allocator policy scoped",
+        ),
+        *(
+            (
+                Path(relative_path),
+                "  self->is_rwx_supported = gum_query_rwx_support () != GUM_RWX_NONE;",
+                "#if defined (HAVE_ANDROID)\n"
+                "  self->is_rwx_supported = FALSE;\n"
+                "#else\n"
+                "  self->is_rwx_supported = gum_query_rwx_support () != GUM_RWX_NONE;\n"
+                "#endif",
+                1,
+                "Stalker pools use RW then RX",
+            )
+            for relative_path in (
+                "subprojects/frida-gum/gum/backend-arm/gumstalker-arm.c",
+                "subprojects/frida-gum/gum/backend-arm64/gumstalker-arm64.c",
+                "subprojects/frida-gum/gum/backend-x86/gumstalker-x86.c",
+            )
         ),
     )
-    for relative_path, old, new, description in patches:
+    for relative_path, old, new, expected_count, description in patches:
         count = replace_in_file(frida_dir / relative_path, old, new)
-        if count != 1:
+        if count != expected_count:
             raise BuildError(
                 f"Strict W^X pattern occurred {count} times in "
-                f"{relative_path.as_posix()}; expected 1"
+                f"{relative_path.as_posix()}; expected {expected_count}"
             )
         log(f"  [required] {relative_path.as_posix()}: {description}", "OK")
 
@@ -1410,7 +1441,7 @@ Transformations and verification boundaries:
     parser.add_argument(
         "--strict-wx",
         action="store_true",
-        help="Use Gum's existing non-RWX allocator path on Android",
+        help="Disable persistent anonymous RWX code pools on Android",
     )
     parser.add_argument(
         "--work-dir", "-w", default=None, help="Working directory (default: ./build)"

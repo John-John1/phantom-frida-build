@@ -225,12 +225,19 @@ def test_targeted_patch_uses_non_counted_art_jit_memfd_name(tmp_path: Path) -> N
     assert '"jit-cache"' not in patched
 
 
-def test_strict_wx_patch_uses_gums_existing_non_rwx_path_on_android(tmp_path: Path) -> None:
+def test_strict_wx_patch_limits_non_rwx_mode_to_persistent_android_code_pools(
+    tmp_path: Path,
+) -> None:
     root = make_core_fixture(tmp_path)
     memory = root / "subprojects/frida-gum/gum/gummemory.c"
-    process = root / "subprojects/frida-gum/gum/backend-linux/gumprocess-linux.c"
+    allocator = root / "subprojects/frida-gum/gum/gumcodeallocator.c"
+    stalkers = [
+        root / "subprojects/frida-gum/gum/backend-arm/gumstalker-arm.c",
+        root / "subprojects/frida-gum/gum/backend-arm64/gumstalker-arm64.c",
+        root / "subprojects/frida-gum/gum/backend-x86/gumstalker-x86.c",
+    ]
     memory.parent.mkdir(parents=True, exist_ok=True)
-    process.parent.mkdir(parents=True, exist_ok=True)
+    allocator.parent.mkdir(parents=True, exist_ok=True)
     memory.write_text(
         """GumRwxSupport
 gum_query_rwx_support (void)
@@ -241,60 +248,61 @@ gum_query_rwx_support (void)
   return GUM_RWX_FULL;
 #endif
 }
+
+      restored = ((original_protections[i] & GUM_PAGE_WRITE) != 0)
+          ? GUM_PAGE_RWX
+          : GUM_PAGE_RX;
 """,
         encoding="utf-8",
     )
-    process.write_text(
-        """static const Dl_info *
-gum_try_init_libc_info (void)
-{
-#ifndef HAVE_ANDROID
-  if (!gum_try_resolve_dynamic_symbol ("__libc_start_main", &gum_libc_info))
-#endif
-  {
-    if (!gum_try_resolve_dynamic_symbol ("exit", &gum_libc_info))
-      return NULL;
-  }
+    allocator.write_text(
+        """G_DEFINE_BOXED_TYPE (GumCodeSlice, gum_code_slice, gum_code_slice_ref,
+                     gum_code_slice_unref)
+G_DEFINE_BOXED_TYPE (GumCodeDeflector, gum_code_deflector,
+                     gum_code_deflector_ref, gum_code_deflector_unref)
 
-  return &gum_libc_info;
+void
+gum_code_allocator_init (GumCodeAllocator * allocator,
+                         gsize slice_size)
+{
+  rwx_supported = gum_query_is_rwx_supported ();
+  rwx_supported = gum_query_is_rwx_supported ();
+  if (gum_query_is_rwx_supported ())
+    return;
 }
 """,
         encoding="utf-8",
     )
+    for stalker in stalkers:
+        stalker.parent.mkdir(parents=True, exist_ok=True)
+        stalker.write_text(
+            "  self->is_rwx_supported = gum_query_rwx_support () != GUM_RWX_NONE;\n",
+            encoding="utf-8",
+        )
 
     build.apply_strict_wx_patch(root)
 
-    patched = memory.read_text(encoding="utf-8")
-    patched_process = process.read_text(encoding="utf-8")
-    assert "defined (HAVE_ANDROID)" in patched
-    assert "return GUM_RWX_NONE;" in patched
-    assert "return GUM_RWX_FULL;" in patched
-    assert "dladdr (GUM_FUNCPTR_TO_POINTER (exit), &gum_libc_info)" in patched_process
+    patched_memory = memory.read_text(encoding="utf-8")
+    patched_allocator = allocator.read_text(encoding="utf-8")
+    assert "#if defined (HAVE_DARWIN) && !defined (HAVE_I386)" in patched_memory
+    assert "|| defined (HAVE_ANDROID)" not in patched_memory
+    assert patched_memory.count("restored = GUM_PAGE_RX;") == 0
+    assert "? GUM_PAGE_RWX" in patched_memory
+    assert "gum_code_allocator_is_rwx_supported" in patched_allocator
+    assert patched_allocator.count("gum_query_is_rwx_supported ()") == 1
+    for stalker in stalkers:
+        patched_stalker = stalker.read_text(encoding="utf-8")
+        assert "self->is_rwx_supported = FALSE;" in patched_stalker
+        assert "#if defined (HAVE_ANDROID)" in patched_stalker
 
 
-def test_strict_wx_patch_rejects_upstream_source_drift(tmp_path: Path) -> None:
+def test_strict_wx_patch_rejects_allocator_source_drift(tmp_path: Path) -> None:
     root = make_core_fixture(tmp_path)
-    memory = root / "subprojects/frida-gum/gum/gummemory.c"
-    memory.parent.mkdir(parents=True, exist_ok=True)
-    memory.write_text("GumRwxSupport changed_upstream (void)\n", encoding="utf-8")
+    allocator = root / "subprojects/frida-gum/gum/gumcodeallocator.c"
+    allocator.parent.mkdir(parents=True, exist_ok=True)
+    allocator.write_text("changed upstream allocator\n", encoding="utf-8")
 
-    with pytest.raises(build.BuildError, match="Strict W\\^X pattern occurred 0 times"):
-        build.apply_strict_wx_patch(root)
-
-
-def test_strict_wx_patch_rejects_libc_source_drift(tmp_path: Path) -> None:
-    root = make_core_fixture(tmp_path)
-    memory = root / "subprojects/frida-gum/gum/gummemory.c"
-    process = root / "subprojects/frida-gum/gum/backend-linux/gumprocess-linux.c"
-    memory.parent.mkdir(parents=True, exist_ok=True)
-    process.parent.mkdir(parents=True, exist_ok=True)
-    memory.write_text(
-        "#if defined (HAVE_DARWIN) && !defined (HAVE_I386)\n",
-        encoding="utf-8",
-    )
-    process.write_text("changed upstream libc lookup\n", encoding="utf-8")
-
-    with pytest.raises(build.BuildError, match="gumprocess-linux.c"):
+    with pytest.raises(build.BuildError, match="gumcodeallocator.c"):
         build.apply_strict_wx_patch(root)
 
 

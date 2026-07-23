@@ -79,7 +79,7 @@ Useful options:
 --arch, -a       One or more supported Android architectures
 --port, -p       Listening port; omitted keeps 27042
 --extended, -e   Apply the optional extended identifier transformations
---strict-wx      Use Gum's non-RWX allocator path on Android
+--strict-wx      Disable persistent anonymous RWX code pools on Android
 --temp-fixes     Apply opt-in, device-specific stability changes
 --verify         Reject known forbidden markers in final artifacts
 --skip-build     Patch source without compiling
@@ -101,8 +101,8 @@ SHA256SUMS
 ```
 
 `build-info.json` records the exact builder, Frida, and frida-core commits, NDK
-version, UTC build time, architectures, name, port, strict W^X mode, and workflow
-URL when built in Actions. Verify downloaded binary files before use:
+version, UTC build time, architectures, name, port, strict W^X code-pool mode,
+and workflow URL when built in Actions. Verify downloaded binary files before use:
 
 ```bash
 cd output
@@ -226,6 +226,9 @@ tests/                   Unit, contract, fixture, and workflow tests
   protocol probing and code-integrity checks may still identify instrumentation.
 - This builder does not hide root, automated app launch, Interceptor code
   changes, user-script strings, or failures reported by remote attestation.
+- `--strict-wx` disables Gum's persistent anonymous RWX code pools. A runtime
+  `/proc/maps` sample does not prove that no transient RWX permission change occurs
+  while executable code is being patched.
 - The external memory gate scans the mapped agent/Gadget images for its explicit
   marker set; it is not a general-purpose scan of every anonymous heap page.
 - Frida 17 raw agents need explicit bridge imports or bundling. The harness uses

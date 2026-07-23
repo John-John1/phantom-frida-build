@@ -121,6 +121,52 @@ setTimeout(function () {
         }
     }
 
+    // 6. Native tracing (exercises Stalker's executable-code pools).
+    var stalkerActive = false;
+    try {
+        var stalkerGetpidAddress = Module.findGlobalExportByName('getpid');
+        if (stalkerGetpidAddress === null) {
+            fail('Stalker getpid export unavailable');
+        } else {
+            var stalkerObservedCalls = false;
+            var stalkerGetpid = new NativeFunction(stalkerGetpidAddress, 'int', [], {
+                traps: 'all'
+            });
+            Stalker.queueDrainInterval = 0;
+            Stalker.follow({
+                events: {
+                    call: true
+                },
+                onCallSummary(summary) {
+                    if (Object.keys(summary).length > 0) {
+                        stalkerObservedCalls = true;
+                    }
+                }
+            });
+            stalkerActive = true;
+            stalkerGetpid();
+            stalkerGetpid();
+            Stalker.unfollow();
+            stalkerActive = false;
+            Stalker.flush();
+            if (!stalkerObservedCalls) {
+                fail('Stalker observed no native calls');
+            }
+        }
+    } catch (error) {
+        fail('Stalker acceptance failed', error);
+    } finally {
+        try {
+            if (stalkerActive) {
+                Stalker.unfollow();
+            }
+            Stalker.flush();
+            Stalker.garbageCollect();
+        } catch (error) {
+            fail('Stalker cleanup failed', error);
+        }
+    }
+
     if (!javaAvailable) {
         fail('Java bridge unavailable');
         finish();
