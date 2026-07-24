@@ -294,6 +294,12 @@ gum_code_allocator_init (GumCodeAllocator * allocator,
 			mmap_offset = (uint64) (uintptr) libc.find_export_by_name ("mmap") - local_libc.start;
 			munmap_offset = (uint64) (uintptr) libc.find_export_by_name ("munmap") - local_libc.start;
 
+			BootstrapResult bootstrap_result = yield bootstrap (loader_layout.size, cancellable);
+			uint64 loader_base = (uintptr) bootstrap_result.context.allocation_base;
+
+			try {
+				unowned uint8[] loader_code = Frida.Data.HelperBackend.get_loader_bin_blob ().data;
+
 			uint64 loader_base = (uintptr) bres.context.allocation_base;
 			GPRegs regs = saved_regs;
 
@@ -310,11 +316,29 @@ gum_code_allocator_init (GumCodeAllocator * allocator,
 					Posix.PROT_READ | Posix.PROT_WRITE | Posix.PROT_EXEC, cancellable);
 			} else {
 
+				write_memory (allocation_base, bootstrapper_code);
+				maybe_fixup_helper_code (allocation_base, bootstrapper_code);
+				uint64 code_start = allocation_base;
+
 				bootstrap_ctx.allocation_size = allocation_size;
 				write_memory (bootstrap_ctx_location, (uint8[]) &bootstrap_ctx);
 
 					bootstrap_ctx.allocation_size = allocation_size;
 					bootstrap_ctx.page_size = Gum.query_page_size ();
+
+	private sealed class BootstrapResult {
+		public HelperBootstrapContext context;
+		public HelperLibcApi libc;
+		public AllocatedStack allocated_stack;
+
+		public BootstrapResult clone () {
+			var res = new BootstrapResult ();
+			res.context = context;
+			res.libc = libc;
+			res.allocated_stack = allocated_stack;
+			return res;
+		}
+	}
 
 	protected struct HelperBootstrapContext {
 		void * allocation_base;
@@ -417,7 +441,7 @@ def test_strict_wx_patch_limits_non_rwx_mode_to_persistent_android_code_pools(
         assert "#if defined (HAVE_ANDROID)" in patched_stalker
 
 
-def test_strict_wx_patch_splits_android_bootstrap_code_data_and_stack(
+def test_strict_wx_patch_stages_android_bootstrap_and_loader_permissions(
     tmp_path: Path,
 ) -> None:
     root, paths, _ = make_strict_wx_fixture(tmp_path)
@@ -425,30 +449,19 @@ def test_strict_wx_patch_splits_android_bootstrap_code_data_and_stack(
     build.apply_strict_wx_patch(root, "frida")
 
     backend = paths["helper_backend"].read_text(encoding="utf-8")
-    bootstrapper = paths["bootstrapper"].read_text(encoding="utf-8")
-    context = paths["inject_context"].read_text(encoding="utf-8")
-    proc_mem = paths["proc_mem"].read_text(encoding="utf-8")
 
     assert "mprotect_offset" in backend
     assert "yield protect_memory" in backend
-    assert "loader_base + loader_layout.ctx_offset" in backend
-    assert "allocation_base + allocation_size - stack_size" in backend
+    assert "loader_base, loader_layout.size" in backend
+    assert "loader_base, loader_layout.ctx_offset" in backend
+    assert "allocation_base, allocation_size - stack_size" in backend
     assert "Posix.PROT_READ | Posix.PROT_EXEC" in backend
+    assert "Posix.PROT_READ | Posix.PROT_WRITE, cancellable" in backend
     assert "Posix.PROT_READ | Posix.PROT_WRITE | Posix.PROT_EXEC" in backend
-    assert backend.count("bootstrap_ctx.stack_size = stack_size;") == 2
+    assert "Unable to enforce strict W^X without a matching remote libc" in backend
+    assert "public uint64 mprotect;" in backend
+    assert "res.mprotect = mprotect;" in backend
     assert "#if ANDROID" in backend
-
-    assert "#ifdef __ANDROID__" in bootstrapper
-    assert "frida_mprotect" in bootstrapper
-    assert "PROT_READ | PROT_EXEC" in bootstrapper
-    assert "PROT_READ | PROT_WRITE | PROT_EXEC" in bootstrapper
-    assert "ctx.total_missing = 18;" in bootstrapper
-    assert "FRIDA_TRY_COLLECT (mprotect)" in bootstrapper
-
-    assert "size_t stack_size;" in context
-    assert "int (* mprotect)" in context
-    assert "void * mprotect;" in backend
-    assert 'api.table.mprotect = resolve_one (remote_maps, "mprotect");' in proc_mem
 
 
 def test_strict_wx_patch_uses_the_renamed_helper_backend(tmp_path: Path) -> None:
@@ -460,6 +473,22 @@ def test_strict_wx_patch_uses_the_renamed_helper_backend(tmp_path: Path) -> None
 
     assert not paths["helper_backend"].exists()
     assert "mprotect_offset" in renamed_backend.read_text(encoding="utf-8")
+
+
+def test_strict_wx_patch_preserves_the_precompiled_bootstrap_abi(tmp_path: Path) -> None:
+    root, paths, _ = make_strict_wx_fixture(tmp_path)
+    original_bootstrapper = paths["bootstrapper"].read_text(encoding="utf-8")
+    original_context = paths["inject_context"].read_text(encoding="utf-8")
+    original_proc_mem = paths["proc_mem"].read_text(encoding="utf-8")
+
+    build.apply_strict_wx_patch(root, "frida")
+
+    backend = paths["helper_backend"].read_text(encoding="utf-8")
+    assert paths["bootstrapper"].read_text(encoding="utf-8") == original_bootstrapper
+    assert paths["inject_context"].read_text(encoding="utf-8") == original_context
+    assert paths["proc_mem"].read_text(encoding="utf-8") == original_proc_mem
+    assert "bootstrap_ctx.stack_size" not in backend
+    assert "void * mprotect;" not in backend
 
 
 def test_strict_wx_patch_rejects_allocator_source_drift(tmp_path: Path) -> None:
@@ -475,9 +504,17 @@ def test_strict_wx_patch_rejects_android_injector_source_drift(
     tmp_path: Path,
 ) -> None:
     root, paths, _ = make_strict_wx_fixture(tmp_path)
-    paths["bootstrapper"].write_text("changed upstream bootstrapper\n", encoding="utf-8")
+    backend = paths["helper_backend"]
+    backend.write_text(
+        backend.read_text(encoding="utf-8").replace(
+            "Frida.Data.HelperBackend.get_loader_bin_blob ().data;",
+            "changed upstream loader source;",
+            1,
+        ),
+        encoding="utf-8",
+    )
 
-    with pytest.raises(build.BuildError, match="bootstrapper.c"):
+    with pytest.raises(build.BuildError, match="helper-backend.vala"):
         build.apply_strict_wx_patch(root, "frida")
 
 

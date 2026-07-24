@@ -866,18 +866,41 @@ def apply_strict_wx_patch(frida_dir: Path, custom_name: str) -> None:
         ),
         (
             helper_backend,
+            "\t\t\tBootstrapResult bootstrap_result = yield bootstrap "
+            "(loader_layout.size, cancellable);\n"
+            "\t\t\tuint64 loader_base = (uintptr) bootstrap_result.context.allocation_base;"
+            "\n\n"
+            "\t\t\ttry {\n"
+            "\t\t\t\tunowned uint8[] loader_code = "
+            "Frida.Data.HelperBackend.get_loader_bin_blob ().data;",
+            "\t\t\tBootstrapResult bootstrap_result = yield bootstrap "
+            "(loader_layout.size, cancellable);\n"
+            "\t\t\tuint64 loader_base = (uintptr) bootstrap_result.context.allocation_base;"
+            "\n\n"
+            "\t\t\ttry {\n"
+            "#if ANDROID\n"
+            "\t\t\t\tyield protect_memory (bootstrap_result.mprotect,\n"
+            "\t\t\t\t\tloader_base, loader_layout.size,\n"
+            "\t\t\t\t\tPosix.PROT_READ | Posix.PROT_WRITE, cancellable);\n"
+            "#endif\n"
+            "\t\t\t\tunowned uint8[] loader_code = "
+            "Frida.Data.HelperBackend.get_loader_bin_blob ().data;",
+            1,
+            "loader staging is writable and non-executable",
+        ),
+        (
+            helper_backend,
             "\t\t\tuint64 loader_base = (uintptr) bres.context.allocation_base;\n"
             "\t\t\tGPRegs regs = saved_regs;",
             "\t\t\tuint64 loader_base = (uintptr) bres.context.allocation_base;\n"
             "#if ANDROID\n"
-            "\t\t\tyield protect_memory ((uintptr) bres.libc.mprotect,\n"
-            "\t\t\t\tloader_base + loader_layout.ctx_offset,\n"
-            "\t\t\t\tloader_layout.size - loader_layout.ctx_offset,\n"
-            "\t\t\t\tPosix.PROT_READ | Posix.PROT_WRITE, cancellable);\n"
+            "\t\t\tyield protect_memory (bres.mprotect,\n"
+            "\t\t\t\tloader_base, loader_layout.ctx_offset,\n"
+            "\t\t\t\tPosix.PROT_READ | Posix.PROT_EXEC, cancellable);\n"
             "#endif\n"
             "\t\t\tGPRegs regs = saved_regs;",
             1,
-            "loader context is writable but not executable",
+            "loader code is executable and non-writable",
         ),
         (
             helper_backend,
@@ -891,12 +914,20 @@ def apply_strict_wx_patch(frida_dir: Path, custom_name: str) -> None:
         (
             helper_backend,
             "\t\t\t\tremote_mmap = remote_libc.start + mmap_offset;\n"
-            "\t\t\t\tremote_munmap = remote_libc.start + munmap_offset;",
+            "\t\t\t\tremote_munmap = remote_libc.start + munmap_offset;\n"
+            "\t\t\t}",
             "\t\t\t\tremote_mmap = remote_libc.start + mmap_offset;\n"
             "\t\t\t\tremote_mprotect = remote_libc.start + mprotect_offset;\n"
-            "\t\t\t\tremote_munmap = remote_libc.start + munmap_offset;",
+            "\t\t\t\tremote_munmap = remote_libc.start + munmap_offset;\n"
+            "\t\t\t}\n"
+            "#if ANDROID\n"
+            "\t\t\tif (remote_mmap == 0 || remote_mprotect == 0)\n"
+            '\t\t\t\tthrow new Error.NOT_SUPPORTED ("Unable to enforce strict W^X '
+            'without a matching remote libc");\n'
+            "#endif\n"
+            "\t\t\tresult.mprotect = remote_mprotect;",
             1,
-            "locate target mprotect",
+            "locate target mprotect and fail closed",
         ),
         (
             helper_backend,
@@ -907,63 +938,53 @@ def apply_strict_wx_patch(frida_dir: Path, custom_name: str) -> None:
             "\t\t\tif (remote_mmap != 0) {\n"
             "#if ANDROID\n"
             "\t\t\t\tallocation_base = yield allocate_memory (remote_mmap, allocation_size,\n"
-            "\t\t\t\t\tPosix.PROT_READ | Posix.PROT_EXEC, cancellable);\n"
-            "\t\t\t\ttry {\n"
-            "\t\t\t\t\tyield protect_memory (remote_mprotect,\n"
-            "\t\t\t\t\t\tallocation_base + allocation_size - stack_size, stack_size,\n"
-            "\t\t\t\t\t\tPosix.PROT_READ | Posix.PROT_WRITE, cancellable);\n"
-            "\t\t\t\t} catch (GLib.Error e) {\n"
-            "\t\t\t\t\ttry {\n"
-            "\t\t\t\t\t\tyield deallocate_memory (remote_munmap, allocation_base,\n"
-            "\t\t\t\t\t\t\tallocation_size, null);\n"
-            "\t\t\t\t\t} catch (GLib.Error ignored) {\n"
-            "\t\t\t\t\t}\n"
-            "\t\t\t\t\tthrow_api_error (e);\n"
-            "\t\t\t\t}\n"
+            "\t\t\t\t\tPosix.PROT_READ | Posix.PROT_WRITE, cancellable);\n"
             "#else\n"
             "\t\t\t\tallocation_base = yield allocate_memory (remote_mmap, allocation_size,\n"
             "\t\t\t\t\tPosix.PROT_READ | Posix.PROT_WRITE | Posix.PROT_EXEC, cancellable);\n"
             "#endif\n"
             "\t\t\t} else {",
             1,
-            "bootstrap code and stack use disjoint permissions",
+            "bootstrap allocation starts writable and non-executable",
         ),
         (
             helper_backend,
-            "\t\t\t\tbootstrap_ctx.allocation_size = allocation_size;\n"
-            "\t\t\t\twrite_memory (bootstrap_ctx_location, (uint8[]) &bootstrap_ctx);",
-            "\t\t\t\tbootstrap_ctx.allocation_size = allocation_size;\n"
-            "\t\t\t\tbootstrap_ctx.stack_size = stack_size;\n"
-            "\t\t\t\twrite_memory (bootstrap_ctx_location, (uint8[]) &bootstrap_ctx);",
+            "\t\t\t\twrite_memory (allocation_base, bootstrapper_code);\n"
+            "\t\t\t\tmaybe_fixup_helper_code (allocation_base, bootstrapper_code);\n"
+            "\t\t\t\tuint64 code_start = allocation_base;",
+            "\t\t\t\twrite_memory (allocation_base, bootstrapper_code);\n"
+            "\t\t\t\tmaybe_fixup_helper_code (allocation_base, bootstrapper_code);\n"
+            "#if ANDROID\n"
+            "\t\t\t\tyield protect_memory (remote_mprotect,\n"
+            "\t\t\t\t\tallocation_base, allocation_size - stack_size,\n"
+            "\t\t\t\t\tPosix.PROT_READ | Posix.PROT_EXEC, cancellable);\n"
+            "#endif\n"
+            "\t\t\t\tuint64 code_start = allocation_base;",
             1,
-            "pass allocation bootstrap stack size",
+            "bootstrap code is executable and non-writable",
         ),
         (
             helper_backend,
-            "\t\t\t\t\tbootstrap_ctx.allocation_size = allocation_size;\n"
-            "\t\t\t\t\tbootstrap_ctx.page_size = Gum.query_page_size ();",
-            "\t\t\t\t\tbootstrap_ctx.allocation_size = allocation_size;\n"
-            "\t\t\t\t\tbootstrap_ctx.stack_size = stack_size;\n"
-            "\t\t\t\t\tbootstrap_ctx.page_size = Gum.query_page_size ();",
+            "\t\tpublic HelperBootstrapContext context;\n"
+            "\t\tpublic HelperLibcApi libc;\n"
+            "\t\tpublic AllocatedStack allocated_stack;\n\n"
+            "\t\tpublic BootstrapResult clone () {\n"
+            "\t\t\tvar res = new BootstrapResult ();\n"
+            "\t\t\tres.context = context;\n"
+            "\t\t\tres.libc = libc;\n"
+            "\t\t\tres.allocated_stack = allocated_stack;",
+            "\t\tpublic HelperBootstrapContext context;\n"
+            "\t\tpublic HelperLibcApi libc;\n"
+            "\t\tpublic AllocatedStack allocated_stack;\n"
+            "\t\tpublic uint64 mprotect;\n\n"
+            "\t\tpublic BootstrapResult clone () {\n"
+            "\t\t\tvar res = new BootstrapResult ();\n"
+            "\t\t\tres.context = context;\n"
+            "\t\t\tres.libc = libc;\n"
+            "\t\t\tres.allocated_stack = allocated_stack;\n"
+            "\t\t\tres.mprotect = mprotect;",
             1,
-            "pass runtime bootstrap stack size",
-        ),
-        (
-            helper_backend,
-            "\t\tvoid * allocation_base;\n\t\tsize_t allocation_size;\n\n\t\tsize_t page_size;",
-            "\t\tvoid * allocation_base;\n"
-            "\t\tsize_t allocation_size;\n"
-            "\t\tsize_t stack_size;\n\n"
-            "\t\tsize_t page_size;",
-            1,
-            "bootstrap context records stack size",
-        ),
-        (
-            helper_backend,
-            "\t\tvoid * mmap;\n\t\tvoid * munmap;",
-            "\t\tvoid * mmap;\n\t\tvoid * mprotect;\n\t\tvoid * munmap;",
-            1,
-            "bootstrap resolves mprotect",
+            "retain host-side mprotect across rejuvenation",
         ),
         (
             helper_backend,
@@ -989,122 +1010,6 @@ def apply_strict_wx_patch(frida_dir: Path, custom_name: str) -> None:
             "size_t size, Cancellable? cancellable)",
             1,
             "add remote mprotect call",
-        ),
-        (
-            Path("subprojects/frida-core/src/linux/helpers/bootstrapper.c"),
-            "static int frida_socketpair (int domain, int type, int protocol, int sv[2]);\n"
-            "static int frida_prctl (int option, unsigned long arg2, unsigned long arg3, "
-            "unsigned long arg4, unsigned long arg5);",
-            "static int frida_mprotect (void * address, size_t size, int prot);\n"
-            "static int frida_socketpair (int domain, int type, int protocol, int sv[2]);\n"
-            "static int frida_prctl (int option, unsigned long arg2, unsigned long arg3, "
-            "unsigned long arg4, unsigned long arg5);",
-            1,
-            "declare raw mprotect helper",
-        ),
-        (
-            Path("subprojects/frida-core/src/linux/helpers/bootstrapper.c"),
-            "  if (ctx->allocation_base == NULL)\n"
-            "  {\n"
-            "    ctx->allocation_base = mmap (NULL, ctx->allocation_size, "
-            "PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n"
-            "    return (ctx->allocation_base == MAP_FAILED)\n"
-            "        ? FRIDA_BOOTSTRAP_ALLOCATION_ERROR\n"
-            "        : FRIDA_BOOTSTRAP_ALLOCATION_SUCCESS;\n"
-            "  }",
-            "  if (ctx->allocation_base == NULL)\n"
-            "  {\n"
-            "#ifdef __ANDROID__\n"
-            "    void * stack_base;\n\n"
-            "    ctx->allocation_base = mmap (NULL, ctx->allocation_size, "
-            "PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n"
-            "    if (ctx->allocation_base == MAP_FAILED)\n"
-            "      return FRIDA_BOOTSTRAP_ALLOCATION_ERROR;\n\n"
-            "    stack_base = (uint8_t *) ctx->allocation_base + ctx->allocation_size - "
-            "ctx->stack_size;\n"
-            "    if (frida_mprotect (stack_base, ctx->stack_size, "
-            "PROT_READ | PROT_WRITE) != 0)\n"
-            "    {\n"
-            "      munmap (ctx->allocation_base, ctx->allocation_size);\n"
-            "      ctx->allocation_base = MAP_FAILED;\n"
-            "      return FRIDA_BOOTSTRAP_ALLOCATION_ERROR;\n"
-            "    }\n\n"
-            "    return FRIDA_BOOTSTRAP_ALLOCATION_SUCCESS;\n"
-            "#else\n"
-            "    ctx->allocation_base = mmap (NULL, ctx->allocation_size, "
-            "PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n"
-            "    return (ctx->allocation_base == MAP_FAILED)\n"
-            "        ? FRIDA_BOOTSTRAP_ALLOCATION_ERROR\n"
-            "        : FRIDA_BOOTSTRAP_ALLOCATION_SUCCESS;\n"
-            "#endif\n"
-            "  }",
-            1,
-            "fallback bootstrap splits code and stack",
-        ),
-        (
-            Path("subprojects/frida-core/src/linux/helpers/bootstrapper.c"),
-            "  ctx.total_missing = 17;",
-            "  ctx.total_missing = 18;",
-            1,
-            "require mprotect",
-        ),
-        (
-            Path("subprojects/frida-core/src/linux/helpers/bootstrapper.c"),
-            "  FRIDA_TRY_COLLECT (mmap)\n  FRIDA_TRY_COLLECT (munmap)",
-            "  FRIDA_TRY_COLLECT (mmap)\n"
-            "  FRIDA_TRY_COLLECT (mprotect)\n"
-            "  FRIDA_TRY_COLLECT (munmap)",
-            1,
-            "collect mprotect",
-        ),
-        (
-            Path("subprojects/frida-core/src/linux/helpers/bootstrapper.c"),
-            "static int\nfrida_socketpair (int domain, int type, int protocol, int sv[2])",
-            "static int\n"
-            "frida_mprotect (void * address, size_t size, int prot)\n"
-            "{\n"
-            "#ifdef NOLIBC\n"
-            "  return my_syscall3 (__NR_mprotect, address, size, prot);\n"
-            "#else\n"
-            "  return mprotect (address, size, prot);\n"
-            "#endif\n"
-            "}\n\n"
-            "static int\n"
-            "frida_socketpair (int domain, int type, int protocol, int sv[2])",
-            1,
-            "implement raw mprotect helper",
-        ),
-        (
-            Path("subprojects/frida-core/src/linux/helpers/inject-context.h"),
-            "  void * allocation_base;\n  size_t allocation_size;\n\n  size_t page_size;",
-            "  void * allocation_base;\n"
-            "  size_t allocation_size;\n"
-            "  size_t stack_size;\n\n"
-            "  size_t page_size;",
-            1,
-            "align C bootstrap context",
-        ),
-        (
-            Path("subprojects/frida-core/src/linux/helpers/inject-context.h"),
-            "  void * (* mmap) (void * addr, size_t length, int prot, int flags, int fd, "
-            "off_t offset);\n"
-            "  int (* munmap) (void * addr, size_t length);",
-            "  void * (* mmap) (void * addr, size_t length, int prot, int flags, int fd, "
-            "off_t offset);\n"
-            "  int (* mprotect) (void * addr, size_t length, int prot);\n"
-            "  int (* munmap) (void * addr, size_t length);",
-            1,
-            "align C libc API",
-        ),
-        (
-            Path("subprojects/frida-core/src/linux/proc-mem-injector.vala"),
-            '\t\t\tapi.table.mmap = resolve_one (remote_maps, "mmap");\n'
-            '\t\t\tapi.table.munmap = resolve_one (remote_maps, "munmap");',
-            '\t\t\tapi.table.mmap = resolve_one (remote_maps, "mmap");\n'
-            '\t\t\tapi.table.mprotect = resolve_one (remote_maps, "mprotect");\n'
-            '\t\t\tapi.table.munmap = resolve_one (remote_maps, "munmap");',
-            1,
-            "align proc-mem libc API",
         ),
     )
     for relative_path, old, new, expected_count, description in patches:

@@ -26,6 +26,7 @@ def test_readme_does_not_overclaim_protocol_or_version_support() -> None:
     assert "SHA256SUMS" in readme
     assert "android_smoke.py" in readme
     assert "--strict-wx" in readme
+    assert "fails closed instead of using its upstream RWX fallback" in normalized
     assert "does not prove that no transient RWX permission change occurs" in normalized
     assert "3-20 characters" in readme
     assert "a reproducible arm64 build" not in readme.lower()

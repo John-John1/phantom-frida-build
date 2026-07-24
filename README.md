@@ -228,10 +228,12 @@ tests/                   Unit, contract, fixture, and workflow tests
   changes, user-script strings, or failures reported by remote attestation.
 - `--strict-wx` separates the Android injector's executable code from writable
   data and stack pages, disables Gum's persistent RWX code pools, and finalizes
-  newly generated code as RX. It preserves pages that were already RWX and does
-  not reject an explicit user-script request for RWX memory. A runtime
-  `/proc/maps` sample does not prove that no transient RWX permission change
-  occurs while executable code is being patched.
+  newly generated code as RX. If a matching remote libc is unavailable, the
+  Android injector fails closed instead of using its upstream RWX fallback. It
+  preserves pages that were already RWX and does not reject an explicit
+  user-script request for RWX memory. A runtime `/proc/maps` sample does not
+  prove that no transient RWX permission change occurs while executable code is
+  being patched.
 - The external memory gate scans the mapped agent/Gadget images for its explicit
   marker set; it is not a general-purpose scan of every anonymous heap page.
 - Frida 17 raw agents need explicit bridge imports or bundling. The harness uses
