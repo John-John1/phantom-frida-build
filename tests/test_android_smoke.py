@@ -637,6 +637,7 @@ def test_acceptance_agent_uses_frida_17_file_and_java_wrapper_apis() -> None:
     assert "Java.cast(iterator.next(), Thread).getName()" in source
     assert "rpc.exports" in source
     assert "add(left, right)" in source
+    assert "new NativeCallback" in source
     assert "Interceptor.attach" in source
     assert "new NativeFunction" in source
     assert "Stalker.follow" in source

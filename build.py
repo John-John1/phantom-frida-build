@@ -822,6 +822,226 @@ def apply_strict_wx_patch(frida_dir: Path, custom_name: str) -> None:
             1,
             "new Android code pages finish RX",
         ),
+        (
+            Path("subprojects/frida-gum/gum/gum-init.h"),
+            "GUM_API void _gum_register_early_destructor (GumDestructorFunc destructor);\n"
+            "GUM_API void _gum_register_destructor (GumDestructorFunc destructor);\n\n"
+            "G_END_DECLS",
+            "GUM_API void _gum_register_early_destructor (GumDestructorFunc destructor);\n"
+            "GUM_API void _gum_register_destructor (GumDestructorFunc destructor);\n\n"
+            "#if defined (HAVE_ANDROID)\n"
+            "G_GNUC_INTERNAL gpointer _gum_android_ffi_closure_make_executable (\n"
+            "    gpointer closure, gpointer code, gsize closure_size,\n"
+            "    gpointer * code_page);\n"
+            "G_GNUC_INTERNAL void _gum_android_ffi_closure_free_executable (\n"
+            "    gpointer code_page);\n"
+            "#endif\n\n"
+            "G_END_DECLS",
+            1,
+            "declare Android NativeCallback W^X helpers",
+        ),
+        (
+            Path("subprojects/frida-gum/gum/gum.c"),
+            "static void\n"
+            "gum_on_ffi_deallocate (void * base_address,\n"
+            "                       size_t size)\n"
+            "{\n"
+            "  GumMemoryRange range;\n"
+            "  range.base_address = GUM_ADDRESS (base_address);\n"
+            "  range.size = size;\n"
+            "  gum_cloak_remove_range (&range);\n"
+            "}\n\n"
+            "#endif",
+            "static void\n"
+            "gum_on_ffi_deallocate (void * base_address,\n"
+            "                       size_t size)\n"
+            "{\n"
+            "  GumMemoryRange range;\n"
+            "  range.base_address = GUM_ADDRESS (base_address);\n"
+            "  range.size = size;\n"
+            "  gum_cloak_remove_range (&range);\n"
+            "}\n\n"
+            "#endif\n\n"
+            "#ifdef HAVE_ANDROID\n\n"
+            "gpointer\n"
+            "_gum_android_ffi_closure_make_executable (gpointer closure,\n"
+            "                                          gpointer code,\n"
+            "                                          gsize closure_size,\n"
+            "                                          gpointer * code_page)\n"
+            "{\n"
+            "  gsize page_size, closure_region_size;\n"
+            "  guintptr closure_address, closure_page_address, code_address;\n"
+            "  guintptr normalized_code_address, code_state, code_offset;\n"
+            "  gpointer executable_page;\n"
+            "  GumMemoryRange range;\n"
+            "  GumPageProtection closure_protection, code_protection;\n\n"
+            "  *code_page = NULL;\n"
+            "  page_size = gum_query_page_size ();\n"
+            "  if (closure_size > page_size)\n"
+            "    return NULL;\n\n"
+            "  closure_address = GPOINTER_TO_SIZE (closure);\n"
+            "  closure_page_address = closure_address & ~((guintptr) page_size - 1);\n"
+            "  closure_region_size =\n"
+            "      ((closure_address - closure_page_address + closure_size + page_size - 1) /\n"
+            "      page_size) * page_size;\n"
+            "  code_address = GPOINTER_TO_SIZE (code);\n"
+            "  code_state = code_address & 1;\n"
+            "  normalized_code_address = code_address - code_state;\n"
+            "  if (normalized_code_address < closure_address ||\n"
+            "      normalized_code_address - closure_address >= closure_size)\n"
+            "  {\n"
+            "    if (!gum_memory_query_protection (closure, &closure_protection) ||\n"
+            "        !gum_memory_query_protection (\n"
+            "            GSIZE_TO_POINTER (normalized_code_address), &code_protection) ||\n"
+            "        (closure_protection & GUM_PAGE_WRITE) == 0 ||\n"
+            "        (closure_protection & GUM_PAGE_EXECUTE) != 0 ||\n"
+            "        (code_protection & GUM_PAGE_WRITE) != 0 ||\n"
+            "        (code_protection & GUM_PAGE_EXECUTE) == 0)\n"
+            "      return NULL;\n"
+            "    return code;\n"
+            "  }\n"
+            "  code_offset = normalized_code_address - closure_address;\n\n"
+            "  executable_page = gum_memory_allocate (NULL, page_size, page_size,\n"
+            "      GUM_PAGE_RW);\n"
+            "  if (executable_page == NULL)\n"
+            "    return NULL;\n"
+            "  memcpy (executable_page, closure, closure_size);\n\n"
+            "  if (!gum_try_mprotect (GSIZE_TO_POINTER (closure_page_address),\n"
+            "      closure_region_size, GUM_PAGE_RW) ||\n"
+            "      !gum_try_mprotect (executable_page, page_size, GUM_PAGE_RX))\n"
+            "  {\n"
+            "    gum_memory_free (executable_page, page_size);\n"
+            "    return NULL;\n"
+            "  }\n"
+            "  gum_clear_cache (executable_page, closure_size);\n\n"
+            "  range.base_address = GUM_ADDRESS (executable_page);\n"
+            "  range.size = page_size;\n"
+            "  gum_cloak_add_range (&range);\n\n"
+            "  *code_page = executable_page;\n"
+            "  return GSIZE_TO_POINTER (GPOINTER_TO_SIZE (executable_page) +\n"
+            "      code_offset + code_state);\n"
+            "}\n\n"
+            "void\n"
+            "_gum_android_ffi_closure_free_executable (gpointer code_page)\n"
+            "{\n"
+            "  gsize page_size = gum_query_page_size ();\n"
+            "  GumMemoryRange range;\n\n"
+            "  range.base_address = GUM_ADDRESS (code_page);\n"
+            "  range.size = page_size;\n"
+            "  gum_cloak_remove_range (&range);\n"
+            "  gum_memory_free (code_page, page_size);\n"
+            "}\n\n"
+            "#endif",
+            1,
+            "NativeCallback closures use separate RW and RX pages",
+        ),
+        (
+            Path("subprojects/frida-gum/bindings/gumjs/gumquickcore.h"),
+            "  JSValue wrapper;\n  JSValue func;\n  ffi_closure * closure;\n  ffi_cif cif;",
+            "  JSValue wrapper;\n"
+            "  JSValue func;\n"
+            "  ffi_closure * closure;\n"
+            "#if defined (HAVE_ANDROID)\n"
+            "  gpointer code_page;\n"
+            "#endif\n"
+            "  ffi_cif cif;",
+            1,
+            "track QuickJS NativeCallback RX page",
+        ),
+        (
+            Path("subprojects/frida-gum/bindings/gumjs/gumquickcore.c"),
+            "#include <string.h>\n#include <glib/gprintf.h>",
+            "#include <string.h>\n"
+            "#include <glib/gprintf.h>\n"
+            "#if defined (HAVE_ANDROID)\n"
+            "# include <gum/gum-init.h>\n"
+            "#endif",
+            1,
+            "import QuickJS NativeCallback W^X helpers",
+        ),
+        (
+            Path("subprojects/frida-gum/bindings/gumjs/gumquickcore.c"),
+            "  if (ffi_prep_closure_loc (cb->closure, &cb->cif,\n"
+            "      gum_quick_native_callback_invoke, cb, ptr->value) != FFI_OK)\n"
+            "    goto prepare_failed;",
+            "  if (ffi_prep_closure_loc (cb->closure, &cb->cif,\n"
+            "      gum_quick_native_callback_invoke, cb, ptr->value) != FFI_OK)\n"
+            "    goto prepare_failed;\n"
+            "#if defined (HAVE_ANDROID)\n"
+            "  ptr->value = _gum_android_ffi_closure_make_executable (cb->closure,\n"
+            "      ptr->value, sizeof (ffi_closure), &cb->code_page);\n"
+            "  if (ptr->value == NULL)\n"
+            "    goto prepare_failed;\n"
+            "#endif",
+            1,
+            "QuickJS NativeCallback code finishes RX",
+        ),
+        (
+            Path("subprojects/frida-gum/bindings/gumjs/gumquickcore.c"),
+            "gum_quick_native_callback_finalize (GumQuickNativeCallback * callback)\n"
+            "{\n"
+            "  g_clear_pointer (&callback->closure, ffi_closure_free);",
+            "gum_quick_native_callback_finalize (GumQuickNativeCallback * callback)\n"
+            "{\n"
+            "#if defined (HAVE_ANDROID)\n"
+            "  g_clear_pointer (&callback->code_page,\n"
+            "      _gum_android_ffi_closure_free_executable);\n"
+            "#endif\n"
+            "  g_clear_pointer (&callback->closure, ffi_closure_free);",
+            1,
+            "free QuickJS NativeCallback RX page",
+        ),
+        (
+            Path("subprojects/frida-gum/bindings/gumjs/gumv8core.cpp"),
+            "  v8::Global<v8::Function> * func;\n  ffi_closure * closure;\n  ffi_cif cif;",
+            "  v8::Global<v8::Function> * func;\n"
+            "  ffi_closure * closure;\n"
+            "#if defined (HAVE_ANDROID)\n"
+            "  gpointer code_page;\n"
+            "#endif\n"
+            "  ffi_cif cif;",
+            1,
+            "track V8 NativeCallback RX page",
+        ),
+        (
+            Path("subprojects/frida-gum/bindings/gumjs/gumv8core.cpp"),
+            "  if (ffi_prep_closure_loc (callback->closure, &callback->cif,\n"
+            "      gum_v8_native_callback_invoke, callback, func) != FFI_OK)\n"
+            "  {\n"
+            '    _gum_v8_throw_ascii_literal (isolate, "failed to prepare closure");\n'
+            "    goto error;\n"
+            "  }",
+            "  if (ffi_prep_closure_loc (callback->closure, &callback->cif,\n"
+            "      gum_v8_native_callback_invoke, callback, func) != FFI_OK)\n"
+            "  {\n"
+            '    _gum_v8_throw_ascii_literal (isolate, "failed to prepare closure");\n'
+            "    goto error;\n"
+            "  }\n"
+            "#if defined (HAVE_ANDROID)\n"
+            "  func = _gum_android_ffi_closure_make_executable (callback->closure,\n"
+            "      func, sizeof (ffi_closure), &callback->code_page);\n"
+            "  if (func == NULL)\n"
+            "  {\n"
+            '    _gum_v8_throw_ascii_literal (isolate, "failed to protect closure");\n'
+            "    goto error;\n"
+            "  }\n"
+            "#endif",
+            1,
+            "V8 NativeCallback code finishes RX",
+        ),
+        (
+            Path("subprojects/frida-gum/bindings/gumjs/gumv8core.cpp"),
+            "  gum_v8_native_callback_clear (callback);\n\n"
+            "  g_clear_pointer (&callback->closure, ffi_closure_free);",
+            "  gum_v8_native_callback_clear (callback);\n\n"
+            "#if defined (HAVE_ANDROID)\n"
+            "  g_clear_pointer (&callback->code_page,\n"
+            "      _gum_android_ffi_closure_free_executable);\n"
+            "#endif\n"
+            "  g_clear_pointer (&callback->closure, ffi_closure_free);",
+            1,
+            "free V8 NativeCallback RX page",
+        ),
         *(
             (
                 Path(relative_path),

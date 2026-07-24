@@ -234,6 +234,11 @@ def make_strict_wx_fixture(
     paths = {
         "memory": root / "subprojects/frida-gum/gum/gummemory.c",
         "allocator": root / "subprojects/frida-gum/gum/gumcodeallocator.c",
+        "gum": root / "subprojects/frida-gum/gum/gum.c",
+        "gum_init": root / "subprojects/frida-gum/gum/gum-init.h",
+        "quick_core": root / "subprojects/frida-gum/bindings/gumjs/gumquickcore.c",
+        "quick_core_h": root / "subprojects/frida-gum/bindings/gumjs/gumquickcore.h",
+        "v8_core": root / "subprojects/frida-gum/bindings/gumjs/gumv8core.cpp",
         "helper_backend": (root / "subprojects/frida-core/src/linux/frida-helper-backend.vala"),
         "bootstrapper": (root / "subprojects/frida-core/src/linux/helpers/bootstrapper.c"),
         "inject_context": (root / "subprojects/frida-core/src/linux/helpers/inject-context.h"),
@@ -278,6 +283,92 @@ gum_code_allocator_init (GumCodeAllocator * allocator,
   if (gum_query_is_rwx_supported ())
     return;
 }
+""",
+        encoding="utf-8",
+    )
+    paths["gum"].write_text(
+        """static void
+gum_on_ffi_deallocate (void * base_address,
+                       size_t size)
+{
+  GumMemoryRange range;
+  range.base_address = GUM_ADDRESS (base_address);
+  range.size = size;
+  gum_cloak_remove_range (&range);
+}
+
+#endif
+""",
+        encoding="utf-8",
+    )
+    paths["gum_init"].write_text(
+        """GUM_API void _gum_register_early_destructor (GumDestructorFunc destructor);
+GUM_API void _gum_register_destructor (GumDestructorFunc destructor);
+
+G_END_DECLS
+""",
+        encoding="utf-8",
+    )
+    paths["quick_core"].parent.mkdir(parents=True, exist_ok=True)
+    paths["quick_core_h"].write_text(
+        """struct _GumQuickNativeCallback
+{
+  GumQuickNativePointer native_pointer;
+
+  JSValue wrapper;
+  JSValue func;
+  ffi_closure * closure;
+  ffi_cif cif;
+  ffi_type ** atypes;
+  GSList * data;
+
+  GumQuickCore * core;
+};
+""",
+        encoding="utf-8",
+    )
+    paths["quick_core"].write_text(
+        """#include <string.h>
+#include <glib/gprintf.h>
+
+  if (ffi_prep_closure_loc (cb->closure, &cb->cif,
+      gum_quick_native_callback_invoke, cb, ptr->value) != FFI_OK)
+    goto prepare_failed;
+
+static void
+gum_quick_native_callback_finalize (GumQuickNativeCallback * callback)
+{
+  g_clear_pointer (&callback->closure, ffi_closure_free);
+""",
+        encoding="utf-8",
+    )
+    paths["v8_core"].write_text(
+        """struct GumV8NativeCallback
+{
+  gint ref_count;
+
+  v8::Global<v8::Object> * wrapper;
+  gpointer ptr_value;
+
+  v8::Global<v8::Function> * func;
+  ffi_closure * closure;
+  ffi_cif cif;
+  ffi_type ** atypes;
+  GSList * data;
+
+  GumV8Core * core;
+};
+
+  if (ffi_prep_closure_loc (callback->closure, &callback->cif,
+      gum_v8_native_callback_invoke, callback, func) != FFI_OK)
+  {
+    _gum_v8_throw_ascii_literal (isolate, "failed to prepare closure");
+    goto error;
+  }
+
+  gum_v8_native_callback_clear (callback);
+
+  g_clear_pointer (&callback->closure, ffi_closure_free);
 """,
         encoding="utf-8",
     )
@@ -462,6 +553,34 @@ def test_strict_wx_patch_stages_android_bootstrap_and_loader_permissions(
     assert "public uint64 mprotect;" in backend
     assert "res.mprotect = mprotect;" in backend
     assert "#if ANDROID" in backend
+
+
+def test_strict_wx_patch_separates_android_native_callback_code_and_data(
+    tmp_path: Path,
+) -> None:
+    root, paths, _ = make_strict_wx_fixture(tmp_path)
+
+    build.apply_strict_wx_patch(root, "frida")
+
+    gum_init = paths["gum_init"].read_text(encoding="utf-8")
+    gum = paths["gum"].read_text(encoding="utf-8")
+    quick_header = paths["quick_core_h"].read_text(encoding="utf-8")
+    quick_core = paths["quick_core"].read_text(encoding="utf-8")
+    v8_core = paths["v8_core"].read_text(encoding="utf-8")
+
+    assert "_gum_android_ffi_closure_make_executable" in gum_init
+    assert "gum_memory_allocate (NULL, page_size, page_size," in gum
+    assert "GUM_PAGE_RW" in gum
+    assert "gum_memory_query_protection" in gum
+    assert "closure_region_size, GUM_PAGE_RW" in gum
+    assert "gum_try_mprotect (executable_page, page_size, GUM_PAGE_RX)" in gum
+    assert "memcpy (executable_page, closure, closure_size)" in gum
+    assert "gpointer code_page;" in quick_header
+    assert "_gum_android_ffi_closure_make_executable" in quick_core
+    assert "_gum_android_ffi_closure_free_executable" in quick_core
+    assert "gpointer code_page;" in v8_core
+    assert "_gum_android_ffi_closure_make_executable" in v8_core
+    assert "_gum_android_ffi_closure_free_executable" in v8_core
 
 
 def test_strict_wx_patch_uses_the_renamed_helper_backend(tmp_path: Path) -> None:

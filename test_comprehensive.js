@@ -89,7 +89,20 @@ setTimeout(function () {
         fail('agent export lookup failed', error);
     }
 
-    // 5. Native hook execution (exercises Gum's executable-code allocator).
+    // 5. Native callback execution (exercises libffi closure code).
+    try {
+        var incrementCallback = new NativeCallback(function (value) {
+            return value + 1;
+        }, 'int', ['int']);
+        var invokeIncrement = new NativeFunction(incrementCallback, 'int', ['int']);
+        if (invokeIncrement(41) !== 42) {
+            fail('native callback returned unexpected result');
+        }
+    } catch (error) {
+        fail('native callback acceptance failed', error);
+    }
+
+    // 6. Native hook execution (exercises Gum's executable-code allocator).
     var getpidListener = null;
     try {
         var getpidAddress = Module.findGlobalExportByName('getpid');
@@ -121,7 +134,7 @@ setTimeout(function () {
         }
     }
 
-    // 6. Native tracing (exercises Stalker's executable-code pools).
+    // 7. Native tracing (exercises Stalker's executable-code pools).
     var stalkerActive = false;
     try {
         var stalkerGetpidAddress = Module.findGlobalExportByName('getpid');
