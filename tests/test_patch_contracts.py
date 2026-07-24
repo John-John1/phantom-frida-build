@@ -1,3 +1,5 @@
+# ruff: noqa: E501
+
 from pathlib import Path
 
 import pytest
@@ -225,20 +227,26 @@ def test_targeted_patch_uses_non_counted_art_jit_memfd_name(tmp_path: Path) -> N
     assert '"jit-cache"' not in patched
 
 
-def test_strict_wx_patch_limits_non_rwx_mode_to_persistent_android_code_pools(
+def make_strict_wx_fixture(
     tmp_path: Path,
-) -> None:
+) -> tuple[Path, dict[str, Path], list[Path]]:
     root = make_core_fixture(tmp_path)
-    memory = root / "subprojects/frida-gum/gum/gummemory.c"
-    allocator = root / "subprojects/frida-gum/gum/gumcodeallocator.c"
+    paths = {
+        "memory": root / "subprojects/frida-gum/gum/gummemory.c",
+        "allocator": root / "subprojects/frida-gum/gum/gumcodeallocator.c",
+        "helper_backend": (root / "subprojects/frida-core/src/linux/frida-helper-backend.vala"),
+        "bootstrapper": (root / "subprojects/frida-core/src/linux/helpers/bootstrapper.c"),
+        "inject_context": (root / "subprojects/frida-core/src/linux/helpers/inject-context.h"),
+        "proc_mem": (root / "subprojects/frida-core/src/linux/proc-mem-injector.vala"),
+    }
     stalkers = [
         root / "subprojects/frida-gum/gum/backend-arm/gumstalker-arm.c",
         root / "subprojects/frida-gum/gum/backend-arm64/gumstalker-arm64.c",
         root / "subprojects/frida-gum/gum/backend-x86/gumstalker-x86.c",
     ]
-    memory.parent.mkdir(parents=True, exist_ok=True)
-    allocator.parent.mkdir(parents=True, exist_ok=True)
-    memory.write_text(
+    paths["memory"].parent.mkdir(parents=True, exist_ok=True)
+    paths["allocator"].parent.mkdir(parents=True, exist_ok=True)
+    paths["memory"].write_text(
         """GumRwxSupport
 gum_query_rwx_support (void)
 {
@@ -255,7 +263,7 @@ gum_query_rwx_support (void)
 """,
         encoding="utf-8",
     )
-    allocator.write_text(
+    paths["allocator"].write_text(
         """G_DEFINE_BOXED_TYPE (GumCodeSlice, gum_code_slice, gum_code_slice_ref,
                      gum_code_slice_unref)
 G_DEFINE_BOXED_TYPE (GumCodeDeflector, gum_code_deflector,
@@ -279,14 +287,127 @@ gum_code_allocator_init (GumCodeAllocator * allocator,
             "  self->is_rwx_supported = gum_query_rwx_support () != GUM_RWX_NONE;\n",
             encoding="utf-8",
         )
+    paths["helper_backend"].write_text(
+        """		private static uint64 mmap_offset;
+		private static uint64 munmap_offset;
+
+			mmap_offset = (uint64) (uintptr) libc.find_export_by_name ("mmap") - local_libc.start;
+			munmap_offset = (uint64) (uintptr) libc.find_export_by_name ("munmap") - local_libc.start;
+
+			uint64 loader_base = (uintptr) bres.context.allocation_base;
+			GPRegs regs = saved_regs;
+
+			uint64 remote_mmap = 0;
+			uint64 remote_munmap = 0;
+
+			if (same_libc) {
+				remote_mmap = remote_libc.start + mmap_offset;
+				remote_munmap = remote_libc.start + munmap_offset;
+			}
+
+			if (remote_mmap != 0) {
+				allocation_base = yield allocate_memory (remote_mmap, allocation_size,
+					Posix.PROT_READ | Posix.PROT_WRITE | Posix.PROT_EXEC, cancellable);
+			} else {
+
+				bootstrap_ctx.allocation_size = allocation_size;
+				write_memory (bootstrap_ctx_location, (uint8[]) &bootstrap_ctx);
+
+					bootstrap_ctx.allocation_size = allocation_size;
+					bootstrap_ctx.page_size = Gum.query_page_size ();
+
+	protected struct HelperBootstrapContext {
+		void * allocation_base;
+		size_t allocation_size;
+
+		size_t page_size;
+	}
+
+	protected struct HelperLibcApi {
+		void * printf;
+		void * sprintf;
+
+		void * mmap;
+		void * munmap;
+	}
+
+		public async uint64 allocate_memory (uint64 mmap_impl, size_t size, int prot, Cancellable? cancellable)
+				throws Error, IOError {
+			var builder = new RemoteCallBuilder (mmap_impl, saved_regs);
+			RemoteCallResult res = yield builder.build (this).execute (cancellable);
+			if (res.return_value == MAP_FAILED)
+				throw new Error.NOT_SUPPORTED ("Unexpected failure while trying to allocate memory");
+			return res.return_value;
+		}
+
+		public async void deallocate_memory (uint64 munmap_impl, uint64 address, size_t size, Cancellable? cancellable)
+""",
+        encoding="utf-8",
+    )
+    paths["bootstrapper"].write_text(
+        """static int frida_socketpair (int domain, int type, int protocol, int sv[2]);
+static int frida_prctl (int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5);
+
+  if (ctx->allocation_base == NULL)
+  {
+    ctx->allocation_base = mmap (NULL, ctx->allocation_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return (ctx->allocation_base == MAP_FAILED)
+        ? FRIDA_BOOTSTRAP_ALLOCATION_ERROR
+        : FRIDA_BOOTSTRAP_ALLOCATION_SUCCESS;
+  }
+
+  ctx.total_missing = 17;
+
+  FRIDA_TRY_COLLECT (mmap)
+  FRIDA_TRY_COLLECT (munmap)
+
+static int
+frida_socketpair (int domain, int type, int protocol, int sv[2])
+""",
+        encoding="utf-8",
+    )
+    paths["inject_context"].write_text(
+        """struct _FridaBootstrapContext
+{
+  void * allocation_base;
+  size_t allocation_size;
+
+  size_t page_size;
+};
+
+struct _FridaLibcApi
+{
+  int (* printf) (const char * format, ...);
+  int (* sprintf) (char * str, const char * format, ...);
+
+  void * (* mmap) (void * addr, size_t length, int prot, int flags, int fd, off_t offset);
+  int (* munmap) (void * addr, size_t length);
+};
+""",
+        encoding="utf-8",
+    )
+    paths["proc_mem"].write_text(
+        """			api.table.mmap = resolve_one (remote_maps, "mmap");
+			api.table.munmap = resolve_one (remote_maps, "munmap");
+""",
+        encoding="utf-8",
+    )
+    return root, paths, stalkers
+
+
+def test_strict_wx_patch_limits_non_rwx_mode_to_persistent_android_code_pools(
+    tmp_path: Path,
+) -> None:
+    root, paths, stalkers = make_strict_wx_fixture(tmp_path)
 
     build.apply_strict_wx_patch(root)
 
-    patched_memory = memory.read_text(encoding="utf-8")
-    patched_allocator = allocator.read_text(encoding="utf-8")
+    patched_memory = paths["memory"].read_text(encoding="utf-8")
+    patched_allocator = paths["allocator"].read_text(encoding="utf-8")
     assert "#if defined (HAVE_DARWIN) && !defined (HAVE_I386)" in patched_memory
     assert "|| defined (HAVE_ANDROID)" not in patched_memory
-    assert patched_memory.count("restored = GUM_PAGE_RX;") == 0
+    assert "#if defined (HAVE_ANDROID)" in patched_memory
+    assert "original_protections[i] & GUM_PAGE_EXECUTE" in patched_memory
     assert "? GUM_PAGE_RWX" in patched_memory
     assert "gum_code_allocator_is_rwx_supported" in patched_allocator
     assert patched_allocator.count("gum_query_is_rwx_supported ()") == 1
@@ -296,13 +417,56 @@ gum_code_allocator_init (GumCodeAllocator * allocator,
         assert "#if defined (HAVE_ANDROID)" in patched_stalker
 
 
+def test_strict_wx_patch_splits_android_bootstrap_code_data_and_stack(
+    tmp_path: Path,
+) -> None:
+    root, paths, _ = make_strict_wx_fixture(tmp_path)
+
+    build.apply_strict_wx_patch(root)
+
+    backend = paths["helper_backend"].read_text(encoding="utf-8")
+    bootstrapper = paths["bootstrapper"].read_text(encoding="utf-8")
+    context = paths["inject_context"].read_text(encoding="utf-8")
+    proc_mem = paths["proc_mem"].read_text(encoding="utf-8")
+
+    assert "mprotect_offset" in backend
+    assert "yield protect_memory" in backend
+    assert "loader_base + loader_layout.ctx_offset" in backend
+    assert "allocation_base + allocation_size - stack_size" in backend
+    assert "Posix.PROT_READ | Posix.PROT_EXEC" in backend
+    assert "Posix.PROT_READ | Posix.PROT_WRITE | Posix.PROT_EXEC" in backend
+    assert backend.count("bootstrap_ctx.stack_size = stack_size;") == 2
+    assert "#if ANDROID" in backend
+
+    assert "#ifdef __ANDROID__" in bootstrapper
+    assert "frida_mprotect" in bootstrapper
+    assert "PROT_READ | PROT_EXEC" in bootstrapper
+    assert "PROT_READ | PROT_WRITE | PROT_EXEC" in bootstrapper
+    assert "ctx.total_missing = 18;" in bootstrapper
+    assert "FRIDA_TRY_COLLECT (mprotect)" in bootstrapper
+
+    assert "size_t stack_size;" in context
+    assert "int (* mprotect)" in context
+    assert "void * mprotect;" in backend
+    assert 'api.table.mprotect = resolve_one (remote_maps, "mprotect");' in proc_mem
+
+
 def test_strict_wx_patch_rejects_allocator_source_drift(tmp_path: Path) -> None:
-    root = make_core_fixture(tmp_path)
-    allocator = root / "subprojects/frida-gum/gum/gumcodeallocator.c"
-    allocator.parent.mkdir(parents=True, exist_ok=True)
+    root, paths, _ = make_strict_wx_fixture(tmp_path)
+    allocator = paths["allocator"]
     allocator.write_text("changed upstream allocator\n", encoding="utf-8")
 
     with pytest.raises(build.BuildError, match="gumcodeallocator.c"):
+        build.apply_strict_wx_patch(root)
+
+
+def test_strict_wx_patch_rejects_android_injector_source_drift(
+    tmp_path: Path,
+) -> None:
+    root, paths, _ = make_strict_wx_fixture(tmp_path)
+    paths["bootstrapper"].write_text("changed upstream bootstrapper\n", encoding="utf-8")
+
+    with pytest.raises(build.BuildError, match="bootstrapper.c"):
         build.apply_strict_wx_patch(root)
 
 

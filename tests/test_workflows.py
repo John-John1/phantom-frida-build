@@ -103,7 +103,7 @@ def test_verified_release_builds_and_checks_strict_wx_artifacts() -> None:
     assert "command+=(--strict-wx)" in build
     assert "strict_wx: true" in scheduled
     assert '"strict_wx": True' in scheduled
-    assert "- Persistent anonymous RWX pools: disabled" in scheduled
+    assert "- Frida-owned persistent anonymous RWX mappings: hardened" in scheduled
 
 
 def test_scheduled_release_is_pinned_to_the_device_verified_version() -> None:

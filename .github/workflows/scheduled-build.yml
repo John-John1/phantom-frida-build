@@ -161,7 +161,7 @@ jobs:
             echo "- Custom name: ${CUSTOM_NAME}"
             echo "- Custom port: ${CUSTOM_PORT}"
             echo "- Architectures: ${ARCHITECTURES}"
-            echo '- Persistent anonymous RWX pools: disabled'
+            echo '- Frida-owned persistent anonymous RWX mappings: hardened'
             echo "- Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             echo
             echo "Verify the downloaded files with \`sha256sum --check SHA256SUMS\`."
@@ -181,5 +181,5 @@ jobs:
             echo "- Custom name: ${CUSTOM_NAME}"
             echo "- Custom port: ${CUSTOM_PORT}"
             echo "- Architectures: ${ARCHITECTURES}"
-            echo '- Persistent anonymous RWX pools: disabled'
+            echo '- Frida-owned persistent anonymous RWX mappings: hardened'
           } >> "$GITHUB_STEP_SUMMARY"

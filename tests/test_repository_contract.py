@@ -17,6 +17,7 @@ def test_community_and_security_files_exist() -> None:
 
 def test_readme_does_not_overclaim_protocol_or_version_support() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
+    normalized = " ".join(readme.split())
     assert "all 16 detection vectors" not in readme.lower()
     assert "17.x | Fully verified" not in readme
     assert "D-Bus interfaces | Protocol inspection | - | Renamed" not in readme
@@ -25,7 +26,7 @@ def test_readme_does_not_overclaim_protocol_or_version_support() -> None:
     assert "SHA256SUMS" in readme
     assert "android_smoke.py" in readme
     assert "--strict-wx" in readme
-    assert "does not prove that no transient RWX permission change occurs" in readme
+    assert "does not prove that no transient RWX permission change occurs" in normalized
     assert "3-20 characters" in readme
     assert "a reproducible arm64 build" not in readme.lower()
     assert "a verified pinned-input arm64 build" in readme.lower()

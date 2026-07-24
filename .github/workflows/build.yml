@@ -34,7 +34,7 @@ on:
         type: boolean
         default: false
       strict_wx:
-        description: Disable persistent anonymous RWX code pools on Android
+        description: Harden Frida-owned persistent anonymous RWX mappings on Android
         required: false
         type: boolean
         default: false
@@ -76,7 +76,7 @@ on:
         type: boolean
         default: false
       strict_wx:
-        description: Disable persistent anonymous RWX code pools on Android
+        description: Harden Frida-owned persistent anonymous RWX mappings on Android
         required: false
         type: boolean
         default: false

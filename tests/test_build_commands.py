@@ -17,7 +17,7 @@ def test_cli_exposes_strict_wx_as_an_explicit_opt_in() -> None:
     )
 
     assert "--strict-wx" in result.stdout
-    assert "persistent anonymous RWX" in result.stdout
+    assert "Frida-owned persistent anonymous RWX" in result.stdout
 
 
 def test_run_passes_argument_vector_without_shell(
