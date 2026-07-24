@@ -5,7 +5,7 @@ changing a targeted set of observable runtime identifiers. It is a builder and
 verification harness, not a promise that every application-specific detection
 method is defeated.
 
-The current compatibility target is **Frida 17.16.3** on Android. Other Frida
+The current compatibility target is **Frida 17.16.4** on Android. Other Frida
 versions are intentionally treated as unverified until their source contracts,
 full build, and rooted-device acceptance have been repeated.
 
@@ -16,7 +16,7 @@ test.
 
 The repository separates three kinds of evidence:
 
-1. Unit and fixture tests validate input handling, exact Frida 17.16.3 source
+1. Unit and fixture tests validate input handling, exact Frida 17.16.4 source
    patch contracts, DEX rebuilding, artifact promotion, metadata, workflows,
    and failure behavior.
 2. `build.py --verify` requires both Server and Gadget, strips the staged
@@ -62,11 +62,12 @@ If `--ndk-path` is omitted, the builder downloads Android NDK r29 under
 ```bash
 export ANDROID_SDK_ROOT=/path/to/Android/Sdk
 python3 build.py \
-  --version 17.16.3 \
+  --version 17.16.4 \
   --name oemcodec \
   --arch android-arm64 \
   --port 27142 \
   --extended \
+  --strict-wx \
   --verify
 ```
 
@@ -78,6 +79,7 @@ Useful options:
 --arch, -a       One or more supported Android architectures
 --port, -p       Listening port; omitted keeps 27042
 --extended, -e   Apply the optional extended identifier transformations
+--strict-wx      Harden Frida-owned persistent anonymous RWX mappings on Android
 --temp-fixes     Apply opt-in, device-specific stability changes
 --verify         Reject known forbidden markers in final artifacts
 --skip-build     Patch source without compiling
@@ -90,17 +92,17 @@ Useful options:
 For the example above, `output/` contains:
 
 ```text
-oemcodec-server-17.16.3-android-arm64
-oemcodec-server-17.16.3-android-arm64.gz
-oemcodec-gadget-17.16.3-android-arm64.so
-oemcodec-gadget-17.16.3-android-arm64.so.gz
+oemcodec-server-17.16.4-android-arm64
+oemcodec-server-17.16.4-android-arm64.gz
+oemcodec-gadget-17.16.4-android-arm64.so
+oemcodec-gadget-17.16.4-android-arm64.so.gz
 build-info.json
 SHA256SUMS
 ```
 
 `build-info.json` records the exact builder, Frida, and frida-core commits, NDK
-version, UTC build time, architectures, name, port, and workflow URL when built
-in Actions. Verify downloaded binary files before use:
+version, UTC build time, architectures, name, port, strict W^X code-pool mode,
+and workflow URL when built in Actions. Verify downloaded binary files before use:
 
 ```bash
 cd output
@@ -159,12 +161,12 @@ Install the exact Python binding recorded in `build-info.json`, install the
 pinned Java bridge dependency, and connect exactly one rooted Android device:
 
 ```bash
-python3 -m pip install "frida==17.16.3" frida-tools
+python3 -m pip install "frida==17.16.4" frida-tools
 npm ci --ignore-scripts
 
 python3 scripts/android_smoke.py \
-  --server output/oemcodec-server-17.16.3-android-arm64 \
-  --gadget output/oemcodec-gadget-17.16.3-android-arm64.so \
+  --server output/oemcodec-server-17.16.4-android-arm64 \
+  --gadget output/oemcodec-gadget-17.16.4-android-arm64.so \
   --name oemcodec \
   --port 27142 \
   --package com.example.app \
@@ -215,7 +217,7 @@ tests/                   Unit, contract, fixture, and workflow tests
 
 ## Known boundaries
 
-- Only Frida 17.16.3 is the current verification target; support is not inferred
+- Only Frida 17.16.4 is the current verification target; support is not inferred
   for all 17.x or 16.x releases.
 - `--temp-fixes` changes runtime behavior and remains opt-in.
 - Marker absence does not prove resistance to behavioral, integrity, timing, or
@@ -224,6 +226,15 @@ tests/                   Unit, contract, fixture, and workflow tests
   protocol probing and code-integrity checks may still identify instrumentation.
 - This builder does not hide root, automated app launch, Interceptor code
   changes, user-script strings, or failures reported by remote attestation.
+- `--strict-wx` separates the Android injector's executable code from writable
+  data and stack pages, disables Gum's persistent RWX code pools, places GumJS
+  `NativeCallback` closure code on dedicated RX pages while keeping libffi
+  storage RW, and finalizes newly generated code as RX. If a matching remote
+  libc is unavailable, the Android injector fails closed instead of using its
+  upstream RWX fallback. It preserves pages that were already RWX and does not
+  reject an explicit user-script request for RWX memory. A runtime `/proc/maps`
+  sample does not prove that no transient RWX permission change occurs while
+  executable code is being patched.
 - The external memory gate scans the mapped agent/Gadget images for its explicit
   marker set; it is not a general-purpose scan of every anonymous heap page.
 - Frida 17 raw agents need explicit bridge imports or bundling. The harness uses

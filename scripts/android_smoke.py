@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -91,6 +92,47 @@ def choose_gadget_port(server_port: int) -> int:
     return candidate if candidate <= 65535 and candidate != 27042 else 27043
 
 
+def analyze_proc_maps(text: str) -> dict[str, int]:
+    """Summarize executable mapping signals without retaining addresses or paths."""
+    report = {
+        "executable": 0,
+        "rwx": 0,
+        "anonymous_rwx": 0,
+        "deleted_executable": 0,
+        "memfd_executable": 0,
+    }
+    for line in text.splitlines():
+        fields = line.split(maxsplit=5)
+        if len(fields) < 5:
+            continue
+        permissions = fields[1]
+        path = fields[5] if len(fields) == 6 else ""
+        executable = len(permissions) >= 3 and permissions[2] == "x"
+        if not executable:
+            continue
+        report["executable"] += 1
+        if permissions.startswith("rwx"):
+            report["rwx"] += 1
+            if not path or path.startswith("["):
+                report["anonymous_rwx"] += 1
+        if "(deleted)" in path:
+            report["deleted_executable"] += 1
+        if path.startswith("/memfd:"):
+            report["memfd_executable"] += 1
+    return report
+
+
+def analyze_thread_statuses(text: str) -> dict[str, object]:
+    """Summarize per-thread tracer and blocked-signal state."""
+    tracer_pids = [int(value) for value in re.findall(r"^TracerPid:\s*(\d+)$", text, re.MULTILINE)]
+    signal_masks = re.findall(r"^SigBlk:\s*([0-9a-fA-F]+)$", text, re.MULTILINE)
+    return {
+        "threads": len(re.findall(r"^Name:\s*.+$", text, re.MULTILINE)),
+        "nonzero_tracer": sum(pid != 0 for pid in tracer_pids),
+        "sigblk": dict(Counter(signal_masks)),
+    }
+
+
 def assert_clean_proc_text(label: str, text: str) -> None:
     forbidden: tuple[str, ...] = (
         "frida-zymbiote",
@@ -115,7 +157,9 @@ def assert_clean_proc_text(label: str, text: str) -> None:
     matches = [marker for marker in forbidden if marker in lowered]
     if matches:
         raise SmokeFailure(f"{label} contains forbidden marker(s): {', '.join(matches)}")
-    if label == "status" and re.search(r"^TracerPid:\s*[1-9]\d*$", text, re.MULTILINE):
+    if label in {"status", "thread-status"} and re.search(
+        r"^TracerPid:\s*[1-9]\d*$", text, re.MULTILINE
+    ):
         raise SmokeFailure("status contains an active TracerPid")
 
 
@@ -237,14 +281,32 @@ def root_shell(
     return adb(serial, "shell", "su", "-c", command, check=check)
 
 
-def _load_matching_frida(config: AndroidSmokeConfig) -> ModuleType:
+def _load_build_metadata(config: AndroidSmokeConfig) -> dict[str, object]:
     metadata_path = config.server.parent / "build-info.json"
     if not metadata_path.is_file():
         raise SmokeFailure(f"build-info.json is required beside the server: {metadata_path}")
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise SmokeFailure(f"Invalid build metadata: {metadata_path}: {error}") from error
+    if not isinstance(metadata, dict):
+        raise SmokeFailure(f"Invalid build metadata: {metadata_path}: expected an object")
+    return metadata
+
+
+def _strict_wx_required(metadata: dict[str, object]) -> bool:
+    value = metadata.get("strict_wx", False)
+    if not isinstance(value, bool):
+        raise SmokeFailure("build metadata strict_wx must be boolean")
+    return value
+
+
+def _load_matching_frida(config: AndroidSmokeConfig) -> ModuleType:
+    metadata_path = config.server.parent / "build-info.json"
+    metadata = _load_build_metadata(config)
+    try:
         expected = str(metadata["frida_version"])
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+    except KeyError as error:
         raise SmokeFailure(f"Invalid build metadata: {metadata_path}: {error}") from error
 
     try:
@@ -321,6 +383,8 @@ def _run_script_acceptance(
     package: str,
     agent_source: str,
     memory_scanner: str,
+    *,
+    require_no_anonymous_rwx: bool = False,
 ) -> dict[str, object]:
     pid: int | None = None
     session: Any = None
@@ -371,6 +435,7 @@ def _run_script_acceptance(
             pid,
             memory_scanner,
             "memfd:jit-code-cache",
+            require_no_anonymous_rwx=require_no_anonymous_rwx,
         )
         return {
             "pid": pid,
@@ -425,23 +490,40 @@ def _scan_process_procfs(
     pid: int,
     memory_scanner: str,
     mapping_needle: str,
-) -> dict[str, int]:
+    *,
+    require_no_anonymous_rwx: bool = False,
+) -> dict[str, object]:
     commands = {
         "unix": "cat /proc/net/unix",
         "maps": f"cat /proc/{pid}/maps",
         "fds": f"ls -l /proc/{pid}/fd",
         "status": f"cat /proc/{pid}/status",
         "threads": f"cat /proc/{pid}/task/*/comm",
+        "thread-status": f"cat /proc/{pid}/task/*/status",
     }
+    maps_report: dict[str, int] = {}
+    thread_report: dict[str, object] = {}
     for label, command in commands.items():
         result = root_shell(serial, command)
         assert_clean_proc_text(label, result.stdout)
+        if label == "maps":
+            maps_report = analyze_proc_maps(result.stdout)
+            if require_no_anonymous_rwx and maps_report["anonymous_rwx"]:
+                raise SmokeFailure(
+                    f"maps contains {maps_report['anonymous_rwx']} anonymous RWX mapping(s)"
+                )
+        elif label == "thread-status":
+            thread_report = analyze_thread_statuses(result.stdout)
     marker_arguments = " ".join(MEMORY_SCAN_MARKERS)
     result = root_shell(
         serial,
         f"{memory_scanner} {pid} {mapping_needle} {marker_arguments}",
     )
-    return _parse_memory_scan(mapping_needle, result.stdout)
+    report: dict[str, object] = {}
+    report.update(_parse_memory_scan(mapping_needle, result.stdout))
+    report["maps"] = maps_report
+    report["threads"] = thread_report
+    return report
 
 
 def _run_gadget_script_acceptance(device: Any, pid: int) -> None:
@@ -598,6 +680,8 @@ def _exercise_gadget(
     memory_scanner: str,
     abi: str,
     api_level: int,
+    *,
+    require_no_anonymous_rwx: bool = False,
 ) -> dict[str, object]:
     gadget_port = choose_gadget_port(config.port)
     endpoint = create_remote_endpoint(config.name, "gadget")
@@ -644,6 +728,7 @@ def _exercise_gadget(
         gadget_pid,
         memory_scanner,
         f"lib{config.name}-gadget.so",
+        require_no_anonymous_rwx=require_no_anonymous_rwx,
     )
     return {
         "abi": abi,
@@ -770,6 +855,8 @@ def _cleanup(config: AndroidSmokeConfig, serial: str) -> None:
 
 
 def run_android_smoke(config: AndroidSmokeConfig, script_path: Path) -> dict[str, object]:
+    metadata = _load_build_metadata(config)
+    require_no_anonymous_rwx = _strict_wx_required(metadata)
     frida_module = _load_matching_frida(config)
     agent_source = _compile_agent(frida_module, script_path)
     serial = require_single_device(run_command(["adb", "devices", "-l"]).stdout)
@@ -800,6 +887,7 @@ def run_android_smoke(config: AndroidSmokeConfig, script_path: Path) -> dict[str
             "frida_version": str(frida_module.__version__),
             "package": config.package,
             "server_port": config.port,
+            "strict_wx": require_no_anonymous_rwx,
         }
         _configure_forward(serial, config.port, server_endpoint.socket)
         run_command(
@@ -820,6 +908,7 @@ def run_android_smoke(config: AndroidSmokeConfig, script_path: Path) -> dict[str
             config.package,
             agent_source,
             memory_scanner,
+            require_no_anonymous_rwx=require_no_anonymous_rwx,
         )
         report["gadget"] = _exercise_gadget(
             config,
@@ -829,6 +918,7 @@ def run_android_smoke(config: AndroidSmokeConfig, script_path: Path) -> dict[str
             memory_scanner,
             abi,
             api_level,
+            require_no_anonymous_rwx=require_no_anonymous_rwx,
         )
         report["status"] = "passed"
         return report

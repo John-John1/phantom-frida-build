@@ -7,7 +7,7 @@ on:
         description: Frida version
         required: false
         type: string
-        default: "17.16.3"
+        default: "17.16.4"
       custom_name:
         description: Replacement for the internal Frida name
         required: false
@@ -33,13 +33,18 @@ on:
         required: false
         type: boolean
         default: false
+      strict_wx:
+        description: Harden Frida-owned persistent anonymous RWX mappings on Android
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       frida_version:
         description: Frida version
         required: true
         type: string
-        default: "17.16.3"
+        default: "17.16.4"
       custom_name:
         description: Replacement for the internal Frida name
         required: true
@@ -70,6 +75,11 @@ on:
         required: false
         type: boolean
         default: false
+      strict_wx:
+        description: Harden Frida-owned persistent anonymous RWX mappings on Android
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -91,6 +101,7 @@ jobs:
       FRIDA_VERSION: ${{ inputs.frida_version }}
       NDK_ARCHIVE_SHA1: 87e2bb7e9be5d6a1c6cdf5ec40dd4e0c6d07c30b
       NDK_ARCHIVE_URL: https://dl.google.com/android/repository/android-ndk-r29-linux.zip
+      STRICT_WX: ${{ inputs.strict_wx }}
       TEMPORARY_FIXES: ${{ inputs.temp_fixes }}
 
     steps:
@@ -161,6 +172,9 @@ jobs:
           fi
           if [[ "$TEMPORARY_FIXES" == "true" ]]; then
             command+=(--temp-fixes)
+          fi
+          if [[ "$STRICT_WX" == "true" ]]; then
+            command+=(--strict-wx)
           fi
 
           printf 'Running:'

@@ -89,6 +89,97 @@ setTimeout(function () {
         fail('agent export lookup failed', error);
     }
 
+    // 5. Native callback execution (exercises libffi closure code).
+    try {
+        var incrementCallback = new NativeCallback(function (value) {
+            return value + 1;
+        }, 'int', ['int']);
+        var invokeIncrement = new NativeFunction(incrementCallback, 'int', ['int']);
+        if (invokeIncrement(41) !== 42) {
+            fail('native callback returned unexpected result');
+        }
+    } catch (error) {
+        fail('native callback acceptance failed', error);
+    }
+
+    // 6. Native hook execution (exercises Gum's executable-code allocator).
+    var getpidListener = null;
+    try {
+        var getpidAddress = Module.findGlobalExportByName('getpid');
+        if (getpidAddress === null) {
+            fail('getpid export unavailable');
+        } else {
+            var getpidObserved = false;
+            getpidListener = Interceptor.attach(getpidAddress, {
+                onEnter() {
+                    getpidObserved = true;
+                }
+            });
+            Interceptor.flush();
+
+            var getpid = new NativeFunction(getpidAddress, 'int', []);
+            var observedPid = getpid();
+            if (!getpidObserved) {
+                fail('native getpid hook did not execute');
+            }
+            if (observedPid !== Process.id) {
+                fail('native getpid returned unexpected pid', observedPid);
+            }
+        }
+    } catch (error) {
+        fail('native hook acceptance failed', error);
+    } finally {
+        if (getpidListener !== null) {
+            getpidListener.detach();
+        }
+    }
+
+    // 7. Native tracing (exercises Stalker's executable-code pools).
+    var stalkerActive = false;
+    try {
+        var stalkerGetpidAddress = Module.findGlobalExportByName('getpid');
+        if (stalkerGetpidAddress === null) {
+            fail('Stalker getpid export unavailable');
+        } else {
+            var stalkerObservedCalls = false;
+            var stalkerGetpid = new NativeFunction(stalkerGetpidAddress, 'int', [], {
+                traps: 'all'
+            });
+            Stalker.queueDrainInterval = 0;
+            Stalker.follow({
+                events: {
+                    call: true
+                },
+                onCallSummary(summary) {
+                    if (Object.keys(summary).length > 0) {
+                        stalkerObservedCalls = true;
+                    }
+                }
+            });
+            stalkerActive = true;
+            stalkerGetpid();
+            stalkerGetpid();
+            Stalker.unfollow();
+            stalkerActive = false;
+            Stalker.flush();
+            if (!stalkerObservedCalls) {
+                fail('Stalker observed no native calls');
+            }
+        }
+    } catch (error) {
+        fail('Stalker acceptance failed', error);
+    } finally {
+        try {
+            if (stalkerActive) {
+                Stalker.unfollow();
+            }
+            Stalker.flush();
+            Stalker.garbageCollect();
+        } catch (error) {
+            fail('Stalker cleanup failed', error);
+        }
+    }
+
     if (!javaAvailable) {
         fail('Java bridge unavailable');
         finish();

@@ -3,13 +3,13 @@
 Custom Frida Builder — build anti-detection Frida server from source.
 
 Extended beyond ajeossida with additional stealth techniques.
-Compatibility target: Frida 17.16.3.
+Compatibility target: Frida 17.16.4.
 
 Usage (run in WSL Ubuntu):
-    python3 build.py --version 17.16.3
-    python3 build.py --version 17.16.3 --name stealth --port 27142
-    python3 build.py --version 17.16.3 --arch android-arm64,android-arm --extended
-    python3 build.py --version 17.16.3 --skip-build  # only patch, don't compile
+    python3 build.py --version 17.16.4
+    python3 build.py --version 17.16.4 --name stealth --port 27142
+    python3 build.py --version 17.16.4 --arch android-arm64,android-arm --extended
+    python3 build.py --version 17.16.4 --skip-build  # only patch, don't compile
 
 Requirements:
     - Ubuntu 22.04+ (WSL works)
@@ -148,7 +148,7 @@ def run(
 
 
 def validate_version(value: str) -> str:
-    """Accept only concrete Frida release tags such as 17.16.3."""
+    """Accept only concrete Frida release tags such as 17.16.4."""
     if VERSION_PATTERN.fullmatch(value) is None:
         raise BuildError("Frida version must use the numeric X.Y.Z release format")
     return value
@@ -770,6 +770,478 @@ def apply_targeted_patches(frida_dir: Path, custom_name: str, frida_major: int):
     log("Targeted patches complete", "OK")
 
 
+def apply_strict_wx_patch(frida_dir: Path, custom_name: str) -> None:
+    """Disable persistent anonymous RWX mappings owned by Frida on Android."""
+    helper_backend = Path(f"subprojects/frida-core/src/linux/{custom_name}-helper-backend.vala")
+    allocator_boxed_types = (
+        "G_DEFINE_BOXED_TYPE (GumCodeSlice, gum_code_slice, gum_code_slice_ref,\n"
+        "                     gum_code_slice_unref)\n"
+        "G_DEFINE_BOXED_TYPE (GumCodeDeflector, gum_code_deflector,\n"
+        "                     gum_code_deflector_ref, gum_code_deflector_unref)\n\n"
+    )
+    patches = (
+        (
+            Path("subprojects/frida-gum/gum/gumcodeallocator.c"),
+            "gum_query_is_rwx_supported ()",
+            "gum_code_allocator_is_rwx_supported ()",
+            3,
+            "code pools use RW then RX",
+        ),
+        (
+            Path("subprojects/frida-gum/gum/gumcodeallocator.c"),
+            allocator_boxed_types + "void\ngum_code_allocator_init",
+            allocator_boxed_types + "static gboolean\n"
+            "gum_code_allocator_is_rwx_supported (void)\n"
+            "{\n"
+            "#if defined (HAVE_ANDROID)\n"
+            "  return FALSE;\n"
+            "#else\n"
+            "  return gum_query_is_rwx_supported ();\n"
+            "#endif\n"
+            "}\n\n"
+            "void\n"
+            "gum_code_allocator_init",
+            1,
+            "Android allocator policy scoped",
+        ),
+        (
+            Path("subprojects/frida-gum/gum/gummemory.c"),
+            "      restored = ((original_protections[i] & GUM_PAGE_WRITE) != 0)\n"
+            "          ? GUM_PAGE_RWX\n"
+            "          : GUM_PAGE_RX;",
+            "#if defined (HAVE_ANDROID)\n"
+            "      restored = ((original_protections[i] & GUM_PAGE_WRITE) != 0 &&\n"
+            "          (original_protections[i] & GUM_PAGE_EXECUTE) != 0)\n"
+            "          ? GUM_PAGE_RWX\n"
+            "          : GUM_PAGE_RX;\n"
+            "#else\n"
+            "      restored = ((original_protections[i] & GUM_PAGE_WRITE) != 0)\n"
+            "          ? GUM_PAGE_RWX\n"
+            "          : GUM_PAGE_RX;\n"
+            "#endif",
+            1,
+            "new Android code pages finish RX",
+        ),
+        (
+            Path("subprojects/frida-gum/gum/gum-init.h"),
+            "GUM_API void _gum_register_early_destructor (GumDestructorFunc destructor);\n"
+            "GUM_API void _gum_register_destructor (GumDestructorFunc destructor);\n\n"
+            "G_END_DECLS",
+            "GUM_API void _gum_register_early_destructor (GumDestructorFunc destructor);\n"
+            "GUM_API void _gum_register_destructor (GumDestructorFunc destructor);\n\n"
+            "#if defined (HAVE_ANDROID)\n"
+            "G_GNUC_INTERNAL gpointer _gum_android_ffi_closure_make_executable (\n"
+            "    gpointer closure, gpointer code, gsize closure_size,\n"
+            "    gpointer * code_page);\n"
+            "G_GNUC_INTERNAL void _gum_android_ffi_closure_free_executable (\n"
+            "    gpointer code_page);\n"
+            "#endif\n\n"
+            "G_END_DECLS",
+            1,
+            "declare Android NativeCallback W^X helpers",
+        ),
+        (
+            Path("subprojects/frida-gum/gum/gum.c"),
+            "static void\n"
+            "gum_on_ffi_deallocate (void * base_address,\n"
+            "                       size_t size)\n"
+            "{\n"
+            "  GumMemoryRange range;\n"
+            "  range.base_address = GUM_ADDRESS (base_address);\n"
+            "  range.size = size;\n"
+            "  gum_cloak_remove_range (&range);\n"
+            "}\n\n"
+            "#endif",
+            "static void\n"
+            "gum_on_ffi_deallocate (void * base_address,\n"
+            "                       size_t size)\n"
+            "{\n"
+            "  GumMemoryRange range;\n"
+            "  range.base_address = GUM_ADDRESS (base_address);\n"
+            "  range.size = size;\n"
+            "  gum_cloak_remove_range (&range);\n"
+            "}\n\n"
+            "#endif\n\n"
+            "#ifdef HAVE_ANDROID\n\n"
+            "gpointer\n"
+            "_gum_android_ffi_closure_make_executable (gpointer closure,\n"
+            "                                          gpointer code,\n"
+            "                                          gsize closure_size,\n"
+            "                                          gpointer * code_page)\n"
+            "{\n"
+            "  gsize page_size, closure_region_size;\n"
+            "  guintptr closure_address, closure_page_address, code_address;\n"
+            "  guintptr normalized_code_address, code_state, code_offset;\n"
+            "  gpointer executable_page;\n"
+            "  GumMemoryRange range;\n"
+            "  GumPageProtection closure_protection, code_protection;\n\n"
+            "  *code_page = NULL;\n"
+            "  page_size = gum_query_page_size ();\n"
+            "  if (closure_size > page_size)\n"
+            "    return NULL;\n\n"
+            "  closure_address = GPOINTER_TO_SIZE (closure);\n"
+            "  closure_page_address = closure_address & ~((guintptr) page_size - 1);\n"
+            "  closure_region_size =\n"
+            "      ((closure_address - closure_page_address + closure_size + page_size - 1) /\n"
+            "      page_size) * page_size;\n"
+            "  code_address = GPOINTER_TO_SIZE (code);\n"
+            "  code_state = code_address & 1;\n"
+            "  normalized_code_address = code_address - code_state;\n"
+            "  if (normalized_code_address < closure_address ||\n"
+            "      normalized_code_address - closure_address >= closure_size)\n"
+            "  {\n"
+            "    if (!gum_memory_query_protection (closure, &closure_protection) ||\n"
+            "        !gum_memory_query_protection (\n"
+            "            GSIZE_TO_POINTER (normalized_code_address), &code_protection) ||\n"
+            "        (closure_protection & GUM_PAGE_WRITE) == 0 ||\n"
+            "        (closure_protection & GUM_PAGE_EXECUTE) != 0 ||\n"
+            "        (code_protection & GUM_PAGE_WRITE) != 0 ||\n"
+            "        (code_protection & GUM_PAGE_EXECUTE) == 0)\n"
+            "      return NULL;\n"
+            "    return code;\n"
+            "  }\n"
+            "  code_offset = normalized_code_address - closure_address;\n\n"
+            "  executable_page = gum_memory_allocate (NULL, page_size, page_size,\n"
+            "      GUM_PAGE_RW);\n"
+            "  if (executable_page == NULL)\n"
+            "    return NULL;\n"
+            "  memcpy (executable_page, closure, closure_size);\n\n"
+            "  if (!gum_try_mprotect (GSIZE_TO_POINTER (closure_page_address),\n"
+            "      closure_region_size, GUM_PAGE_RW) ||\n"
+            "      !gum_try_mprotect (executable_page, page_size, GUM_PAGE_RX))\n"
+            "  {\n"
+            "    gum_memory_free (executable_page, page_size);\n"
+            "    return NULL;\n"
+            "  }\n"
+            "  gum_clear_cache (executable_page, closure_size);\n\n"
+            "  range.base_address = GUM_ADDRESS (executable_page);\n"
+            "  range.size = page_size;\n"
+            "  gum_cloak_add_range (&range);\n\n"
+            "  *code_page = executable_page;\n"
+            "  return GSIZE_TO_POINTER (GPOINTER_TO_SIZE (executable_page) +\n"
+            "      code_offset + code_state);\n"
+            "}\n\n"
+            "void\n"
+            "_gum_android_ffi_closure_free_executable (gpointer code_page)\n"
+            "{\n"
+            "  gsize page_size = gum_query_page_size ();\n"
+            "  GumMemoryRange range;\n\n"
+            "  range.base_address = GUM_ADDRESS (code_page);\n"
+            "  range.size = page_size;\n"
+            "  gum_cloak_remove_range (&range);\n"
+            "  gum_memory_free (code_page, page_size);\n"
+            "}\n\n"
+            "#endif",
+            1,
+            "NativeCallback closures use separate RW and RX pages",
+        ),
+        (
+            Path("subprojects/frida-gum/bindings/gumjs/gumquickcore.h"),
+            "  JSValue wrapper;\n  JSValue func;\n  ffi_closure * closure;\n  ffi_cif cif;",
+            "  JSValue wrapper;\n"
+            "  JSValue func;\n"
+            "  ffi_closure * closure;\n"
+            "#if defined (HAVE_ANDROID)\n"
+            "  gpointer code_page;\n"
+            "#endif\n"
+            "  ffi_cif cif;",
+            1,
+            "track QuickJS NativeCallback RX page",
+        ),
+        (
+            Path("subprojects/frida-gum/bindings/gumjs/gumquickcore.c"),
+            "#include <string.h>\n#include <glib/gprintf.h>",
+            "#include <string.h>\n"
+            "#include <glib/gprintf.h>\n"
+            "#if defined (HAVE_ANDROID)\n"
+            "# include <gum/gum-init.h>\n"
+            "#endif",
+            1,
+            "import QuickJS NativeCallback W^X helpers",
+        ),
+        (
+            Path("subprojects/frida-gum/bindings/gumjs/gumquickcore.c"),
+            "  if (ffi_prep_closure_loc (cb->closure, &cb->cif,\n"
+            "      gum_quick_native_callback_invoke, cb, ptr->value) != FFI_OK)\n"
+            "    goto prepare_failed;",
+            "  if (ffi_prep_closure_loc (cb->closure, &cb->cif,\n"
+            "      gum_quick_native_callback_invoke, cb, ptr->value) != FFI_OK)\n"
+            "    goto prepare_failed;\n"
+            "#if defined (HAVE_ANDROID)\n"
+            "  ptr->value = _gum_android_ffi_closure_make_executable (cb->closure,\n"
+            "      ptr->value, sizeof (ffi_closure), &cb->code_page);\n"
+            "  if (ptr->value == NULL)\n"
+            "    goto prepare_failed;\n"
+            "#endif",
+            1,
+            "QuickJS NativeCallback code finishes RX",
+        ),
+        (
+            Path("subprojects/frida-gum/bindings/gumjs/gumquickcore.c"),
+            "gum_quick_native_callback_finalize (GumQuickNativeCallback * callback)\n"
+            "{\n"
+            "  g_clear_pointer (&callback->closure, ffi_closure_free);",
+            "gum_quick_native_callback_finalize (GumQuickNativeCallback * callback)\n"
+            "{\n"
+            "#if defined (HAVE_ANDROID)\n"
+            "  g_clear_pointer (&callback->code_page,\n"
+            "      _gum_android_ffi_closure_free_executable);\n"
+            "#endif\n"
+            "  g_clear_pointer (&callback->closure, ffi_closure_free);",
+            1,
+            "free QuickJS NativeCallback RX page",
+        ),
+        (
+            Path("subprojects/frida-gum/bindings/gumjs/gumv8core.cpp"),
+            "  v8::Global<v8::Function> * func;\n  ffi_closure * closure;\n  ffi_cif cif;",
+            "  v8::Global<v8::Function> * func;\n"
+            "  ffi_closure * closure;\n"
+            "#if defined (HAVE_ANDROID)\n"
+            "  gpointer code_page;\n"
+            "#endif\n"
+            "  ffi_cif cif;",
+            1,
+            "track V8 NativeCallback RX page",
+        ),
+        (
+            Path("subprojects/frida-gum/bindings/gumjs/gumv8core.cpp"),
+            "  if (ffi_prep_closure_loc (callback->closure, &callback->cif,\n"
+            "      gum_v8_native_callback_invoke, callback, func) != FFI_OK)\n"
+            "  {\n"
+            '    _gum_v8_throw_ascii_literal (isolate, "failed to prepare closure");\n'
+            "    goto error;\n"
+            "  }",
+            "  if (ffi_prep_closure_loc (callback->closure, &callback->cif,\n"
+            "      gum_v8_native_callback_invoke, callback, func) != FFI_OK)\n"
+            "  {\n"
+            '    _gum_v8_throw_ascii_literal (isolate, "failed to prepare closure");\n'
+            "    goto error;\n"
+            "  }\n"
+            "#if defined (HAVE_ANDROID)\n"
+            "  func = _gum_android_ffi_closure_make_executable (callback->closure,\n"
+            "      func, sizeof (ffi_closure), &callback->code_page);\n"
+            "  if (func == NULL)\n"
+            "  {\n"
+            '    _gum_v8_throw_ascii_literal (isolate, "failed to protect closure");\n'
+            "    goto error;\n"
+            "  }\n"
+            "#endif",
+            1,
+            "V8 NativeCallback code finishes RX",
+        ),
+        (
+            Path("subprojects/frida-gum/bindings/gumjs/gumv8core.cpp"),
+            "  gum_v8_native_callback_clear (callback);\n\n"
+            "  g_clear_pointer (&callback->closure, ffi_closure_free);",
+            "  gum_v8_native_callback_clear (callback);\n\n"
+            "#if defined (HAVE_ANDROID)\n"
+            "  g_clear_pointer (&callback->code_page,\n"
+            "      _gum_android_ffi_closure_free_executable);\n"
+            "#endif\n"
+            "  g_clear_pointer (&callback->closure, ffi_closure_free);",
+            1,
+            "free V8 NativeCallback RX page",
+        ),
+        *(
+            (
+                Path(relative_path),
+                "  self->is_rwx_supported = gum_query_rwx_support () != GUM_RWX_NONE;",
+                "#if defined (HAVE_ANDROID)\n"
+                "  self->is_rwx_supported = FALSE;\n"
+                "#else\n"
+                "  self->is_rwx_supported = gum_query_rwx_support () != GUM_RWX_NONE;\n"
+                "#endif",
+                1,
+                "Stalker pools use RW then RX",
+            )
+            for relative_path in (
+                "subprojects/frida-gum/gum/backend-arm/gumstalker-arm.c",
+                "subprojects/frida-gum/gum/backend-arm64/gumstalker-arm64.c",
+                "subprojects/frida-gum/gum/backend-x86/gumstalker-x86.c",
+            )
+        ),
+        (
+            helper_backend,
+            "\t\tprivate static uint64 mmap_offset;\n\t\tprivate static uint64 munmap_offset;",
+            "\t\tprivate static uint64 mmap_offset;\n"
+            "\t\tprivate static uint64 mprotect_offset;\n"
+            "\t\tprivate static uint64 munmap_offset;",
+            1,
+            "track remote mprotect",
+        ),
+        (
+            helper_backend,
+            '\t\t\tmmap_offset = (uint64) (uintptr) libc.find_export_by_name ("mmap")'
+            " - local_libc.start;\n"
+            '\t\t\tmunmap_offset = (uint64) (uintptr) libc.find_export_by_name ("munmap")'
+            " - local_libc.start;",
+            '\t\t\tmmap_offset = (uint64) (uintptr) libc.find_export_by_name ("mmap")'
+            " - local_libc.start;\n"
+            "\t\t\tmprotect_offset = (uint64) (uintptr) libc.find_export_by_name "
+            '("mprotect") - local_libc.start;\n'
+            '\t\t\tmunmap_offset = (uint64) (uintptr) libc.find_export_by_name ("munmap")'
+            " - local_libc.start;",
+            1,
+            "resolve remote mprotect",
+        ),
+        (
+            helper_backend,
+            "\t\t\tBootstrapResult bootstrap_result = yield bootstrap "
+            "(loader_layout.size, cancellable);\n"
+            "\t\t\tuint64 loader_base = (uintptr) bootstrap_result.context.allocation_base;"
+            "\n\n"
+            "\t\t\ttry {\n"
+            "\t\t\t\tunowned uint8[] loader_code = "
+            "Frida.Data.HelperBackend.get_loader_bin_blob ().data;",
+            "\t\t\tBootstrapResult bootstrap_result = yield bootstrap "
+            "(loader_layout.size, cancellable);\n"
+            "\t\t\tuint64 loader_base = (uintptr) bootstrap_result.context.allocation_base;"
+            "\n\n"
+            "\t\t\ttry {\n"
+            "#if ANDROID\n"
+            "\t\t\t\tyield protect_memory (bootstrap_result.mprotect,\n"
+            "\t\t\t\t\tloader_base, loader_layout.size,\n"
+            "\t\t\t\t\tPosix.PROT_READ | Posix.PROT_WRITE, cancellable);\n"
+            "#endif\n"
+            "\t\t\t\tunowned uint8[] loader_code = "
+            "Frida.Data.HelperBackend.get_loader_bin_blob ().data;",
+            1,
+            "loader staging is writable and non-executable",
+        ),
+        (
+            helper_backend,
+            "\t\t\tuint64 loader_base = (uintptr) bres.context.allocation_base;\n"
+            "\t\t\tGPRegs regs = saved_regs;",
+            "\t\t\tuint64 loader_base = (uintptr) bres.context.allocation_base;\n"
+            "#if ANDROID\n"
+            "\t\t\tyield protect_memory (bres.mprotect,\n"
+            "\t\t\t\tloader_base, loader_layout.ctx_offset,\n"
+            "\t\t\t\tPosix.PROT_READ | Posix.PROT_EXEC, cancellable);\n"
+            "#endif\n"
+            "\t\t\tGPRegs regs = saved_regs;",
+            1,
+            "loader code is executable and non-writable",
+        ),
+        (
+            helper_backend,
+            "\t\t\tuint64 remote_mmap = 0;\n\t\t\tuint64 remote_munmap = 0;",
+            "\t\t\tuint64 remote_mmap = 0;\n"
+            "\t\t\tuint64 remote_mprotect = 0;\n"
+            "\t\t\tuint64 remote_munmap = 0;",
+            1,
+            "track target mprotect",
+        ),
+        (
+            helper_backend,
+            "\t\t\t\tremote_mmap = remote_libc.start + mmap_offset;\n"
+            "\t\t\t\tremote_munmap = remote_libc.start + munmap_offset;\n"
+            "\t\t\t}",
+            "\t\t\t\tremote_mmap = remote_libc.start + mmap_offset;\n"
+            "\t\t\t\tremote_mprotect = remote_libc.start + mprotect_offset;\n"
+            "\t\t\t\tremote_munmap = remote_libc.start + munmap_offset;\n"
+            "\t\t\t}\n"
+            "#if ANDROID\n"
+            "\t\t\tif (remote_mmap == 0 || remote_mprotect == 0)\n"
+            '\t\t\t\tthrow new Error.NOT_SUPPORTED ("Unable to enforce strict W^X '
+            'without a matching remote libc");\n'
+            "#endif\n"
+            "\t\t\tresult.mprotect = remote_mprotect;",
+            1,
+            "locate target mprotect and fail closed",
+        ),
+        (
+            helper_backend,
+            "\t\t\tif (remote_mmap != 0) {\n"
+            "\t\t\t\tallocation_base = yield allocate_memory (remote_mmap, allocation_size,\n"
+            "\t\t\t\t\tPosix.PROT_READ | Posix.PROT_WRITE | Posix.PROT_EXEC, cancellable);\n"
+            "\t\t\t} else {",
+            "\t\t\tif (remote_mmap != 0) {\n"
+            "#if ANDROID\n"
+            "\t\t\t\tallocation_base = yield allocate_memory (remote_mmap, allocation_size,\n"
+            "\t\t\t\t\tPosix.PROT_READ | Posix.PROT_WRITE, cancellable);\n"
+            "#else\n"
+            "\t\t\t\tallocation_base = yield allocate_memory (remote_mmap, allocation_size,\n"
+            "\t\t\t\t\tPosix.PROT_READ | Posix.PROT_WRITE | Posix.PROT_EXEC, cancellable);\n"
+            "#endif\n"
+            "\t\t\t} else {",
+            1,
+            "bootstrap allocation starts writable and non-executable",
+        ),
+        (
+            helper_backend,
+            "\t\t\t\twrite_memory (allocation_base, bootstrapper_code);\n"
+            "\t\t\t\tmaybe_fixup_helper_code (allocation_base, bootstrapper_code);\n"
+            "\t\t\t\tuint64 code_start = allocation_base;",
+            "\t\t\t\twrite_memory (allocation_base, bootstrapper_code);\n"
+            "\t\t\t\tmaybe_fixup_helper_code (allocation_base, bootstrapper_code);\n"
+            "#if ANDROID\n"
+            "\t\t\t\tyield protect_memory (remote_mprotect,\n"
+            "\t\t\t\t\tallocation_base, allocation_size - stack_size,\n"
+            "\t\t\t\t\tPosix.PROT_READ | Posix.PROT_EXEC, cancellable);\n"
+            "#endif\n"
+            "\t\t\t\tuint64 code_start = allocation_base;",
+            1,
+            "bootstrap code is executable and non-writable",
+        ),
+        (
+            helper_backend,
+            "\t\tpublic HelperBootstrapContext context;\n"
+            "\t\tpublic HelperLibcApi libc;\n"
+            "\t\tpublic AllocatedStack allocated_stack;\n\n"
+            "\t\tpublic BootstrapResult clone () {\n"
+            "\t\t\tvar res = new BootstrapResult ();\n"
+            "\t\t\tres.context = context;\n"
+            "\t\t\tres.libc = libc;\n"
+            "\t\t\tres.allocated_stack = allocated_stack;",
+            "\t\tpublic HelperBootstrapContext context;\n"
+            "\t\tpublic HelperLibcApi libc;\n"
+            "\t\tpublic AllocatedStack allocated_stack;\n"
+            "\t\tpublic uint64 mprotect;\n\n"
+            "\t\tpublic BootstrapResult clone () {\n"
+            "\t\t\tvar res = new BootstrapResult ();\n"
+            "\t\t\tres.context = context;\n"
+            "\t\t\tres.libc = libc;\n"
+            "\t\t\tres.allocated_stack = allocated_stack;\n"
+            "\t\t\tres.mprotect = mprotect;",
+            1,
+            "retain host-side mprotect across rejuvenation",
+        ),
+        (
+            helper_backend,
+            "\t\tpublic async void deallocate_memory (uint64 munmap_impl, uint64 address, "
+            "size_t size, Cancellable? cancellable)",
+            "\t\tpublic async void protect_memory (uint64 mprotect_impl, uint64 address, "
+            "size_t size, int prot,\n"
+            "\t\t\t\tCancellable? cancellable) throws Error, IOError {\n"
+            "\t\t\tvar builder = new RemoteCallBuilder (mprotect_impl, saved_regs);\n"
+            "\t\t\tbuilder\n"
+            "\t\t\t\t.add_argument (address)\n"
+            "\t\t\t\t.add_argument (size)\n"
+            "\t\t\t\t.add_argument (prot);\n"
+            "\t\t\tRemoteCallResult res = yield builder.build (this).execute (cancellable);\n"
+            "\t\t\tif (res.status != COMPLETED)\n"
+            '\t\t\t\tthrow new Error.NOT_SUPPORTED ("Unexpected crash while trying to '
+            'protect memory");\n'
+            "\t\t\tif (res.return_value != 0)\n"
+            '\t\t\t\tthrow new Error.NOT_SUPPORTED ("Unexpected failure while trying to '
+            'protect memory");\n'
+            "\t\t}\n\n"
+            "\t\tpublic async void deallocate_memory (uint64 munmap_impl, uint64 address, "
+            "size_t size, Cancellable? cancellable)",
+            1,
+            "add remote mprotect call",
+        ),
+    )
+    for relative_path, old, new, expected_count, description in patches:
+        count = replace_in_file(frida_dir / relative_path, old, new)
+        if count != expected_count:
+            raise BuildError(
+                f"Strict W^X pattern occurred {count} times in "
+                f"{relative_path.as_posix()}; expected {expected_count}"
+            )
+        log(f"  [required] {relative_path.as_posix()}: {description}", "OK")
+
+
 def apply_port_patches(frida_dir: Path, port: int | None) -> None:
     """Apply only the configured listening-port replacement."""
     if port is not None and port != 27042:
@@ -1263,6 +1735,7 @@ def create_build_info(
     port: int | None,
     version: str,
     architectures: list[str],
+    strict_wx: bool = False,
 ) -> dict[str, object]:
     """Create release provenance for the builder and upstream source revisions."""
     repository = os.environ.get("GITHUB_REPOSITORY")
@@ -1280,6 +1753,7 @@ def create_build_info(
         "name": name,
         "ndk_version": NDK_VERSION,
         "port": port or 27042,
+        "strict_wx": strict_wx,
         "workflow_url": workflow_url,
     }
 
@@ -1293,6 +1767,7 @@ def write_release_assets(
     port: int | None,
     version: str,
     architectures: list[str],
+    strict_wx: bool = False,
 ) -> tuple[Path, Path]:
     """Write deterministic metadata JSON and checksums for release artifacts."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1305,6 +1780,7 @@ def write_release_assets(
         port=port,
         version=version,
         architectures=architectures,
+        strict_wx=strict_wx,
     )
     info_path.write_text(
         json.dumps(info, indent=2, sort_keys=True) + "\n",
@@ -1331,11 +1807,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3 build.py --version 17.16.3
-  python3 build.py --version 17.16.3 --name stealth --port 27142
-  python3 build.py --version 17.16.3 --arch android-arm64,android-arm --extended
-  python3 build.py --version 17.16.3 --skip-build  # patch only, no compilation
-  python3 build.py --version 17.16.3 --temp-fixes  # add stability patches
+  python3 build.py --version 17.16.4
+  python3 build.py --version 17.16.4 --name stealth --port 27142
+  python3 build.py --version 17.16.4 --arch android-arm64,android-arm --extended
+  python3 build.py --version 17.16.4 --skip-build  # patch only, no compilation
+  python3 build.py --version 17.16.4 --temp-fixes  # add stability patches
 
 Transformations and verification boundaries:
 """
@@ -1343,7 +1819,7 @@ Transformations and verification boundaries:
     )
 
     parser.add_argument(
-        "--version", "-v", required=True, help="Frida version to build (e.g. 17.16.3)"
+        "--version", "-v", required=True, help="Frida version to build (e.g. 17.16.4)"
     )
     parser.add_argument(
         "--arch",
@@ -1371,6 +1847,11 @@ Transformations and verification boundaries:
         "--temp-fixes",
         action="store_true",
         help="Apply stability fixes (perfetto skip, cloak detach)",
+    )
+    parser.add_argument(
+        "--strict-wx",
+        action="store_true",
+        help="Harden Frida-owned persistent anonymous RWX mappings on Android",
     )
     parser.add_argument(
         "--work-dir", "-w", default=None, help="Working directory (default: ./build)"
@@ -1417,6 +1898,7 @@ Transformations and verification boundaries:
     log(f"  Archs:    {', '.join(archs)}", "INFO")
     log(f"  Port:     {port or '27042 (default)'}", "INFO")
     log(f"  Extended: {args.extended}", "INFO")
+    log(f"  Strict W^X: {args.strict_wx}", "INFO")
     log(f"  Work dir: {work_dir}", "INFO")
     log(f"  Output:   {output_dir}", "INFO")
 
@@ -1442,6 +1924,8 @@ Transformations and verification boundaries:
     # Step 3: Source patches
     apply_source_patches(frida_dir, custom_name)
     apply_targeted_patches(frida_dir, custom_name, frida_major)
+    if args.strict_wx:
+        apply_strict_wx_patch(frida_dir, custom_name)
 
     # Step 3.5: Extended patches
     if args.extended:
@@ -1512,6 +1996,7 @@ Transformations and verification boundaries:
             port=port,
             version=version,
             architectures=archs,
+            strict_wx=args.strict_wx,
         )
 
     # Done
