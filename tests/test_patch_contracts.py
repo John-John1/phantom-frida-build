@@ -400,7 +400,7 @@ def test_strict_wx_patch_limits_non_rwx_mode_to_persistent_android_code_pools(
 ) -> None:
     root, paths, stalkers = make_strict_wx_fixture(tmp_path)
 
-    build.apply_strict_wx_patch(root)
+    build.apply_strict_wx_patch(root, "frida")
 
     patched_memory = paths["memory"].read_text(encoding="utf-8")
     patched_allocator = paths["allocator"].read_text(encoding="utf-8")
@@ -422,7 +422,7 @@ def test_strict_wx_patch_splits_android_bootstrap_code_data_and_stack(
 ) -> None:
     root, paths, _ = make_strict_wx_fixture(tmp_path)
 
-    build.apply_strict_wx_patch(root)
+    build.apply_strict_wx_patch(root, "frida")
 
     backend = paths["helper_backend"].read_text(encoding="utf-8")
     bootstrapper = paths["bootstrapper"].read_text(encoding="utf-8")
@@ -451,13 +451,24 @@ def test_strict_wx_patch_splits_android_bootstrap_code_data_and_stack(
     assert 'api.table.mprotect = resolve_one (remote_maps, "mprotect");' in proc_mem
 
 
+def test_strict_wx_patch_uses_the_renamed_helper_backend(tmp_path: Path) -> None:
+    root, paths, _ = make_strict_wx_fixture(tmp_path)
+    renamed_backend = paths["helper_backend"].with_name("oemcodec-helper-backend.vala")
+    build.rename_frida_files(root, "oemcodec")
+
+    build.apply_strict_wx_patch(root, "oemcodec")
+
+    assert not paths["helper_backend"].exists()
+    assert "mprotect_offset" in renamed_backend.read_text(encoding="utf-8")
+
+
 def test_strict_wx_patch_rejects_allocator_source_drift(tmp_path: Path) -> None:
     root, paths, _ = make_strict_wx_fixture(tmp_path)
     allocator = paths["allocator"]
     allocator.write_text("changed upstream allocator\n", encoding="utf-8")
 
     with pytest.raises(build.BuildError, match="gumcodeallocator.c"):
-        build.apply_strict_wx_patch(root)
+        build.apply_strict_wx_patch(root, "frida")
 
 
 def test_strict_wx_patch_rejects_android_injector_source_drift(
@@ -467,7 +478,7 @@ def test_strict_wx_patch_rejects_android_injector_source_drift(
     paths["bootstrapper"].write_text("changed upstream bootstrapper\n", encoding="utf-8")
 
     with pytest.raises(build.BuildError, match="bootstrapper.c"):
-        build.apply_strict_wx_patch(root)
+        build.apply_strict_wx_patch(root, "frida")
 
 
 def test_zymbiote_artifacts_patch_the_fixed_socket_field(tmp_path: Path) -> None:

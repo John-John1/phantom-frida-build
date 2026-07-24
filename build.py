@@ -770,8 +770,9 @@ def apply_targeted_patches(frida_dir: Path, custom_name: str, frida_major: int):
     log("Targeted patches complete", "OK")
 
 
-def apply_strict_wx_patch(frida_dir: Path) -> None:
+def apply_strict_wx_patch(frida_dir: Path, custom_name: str) -> None:
     """Disable persistent anonymous RWX mappings owned by Frida on Android."""
+    helper_backend = Path(f"subprojects/frida-core/src/linux/{custom_name}-helper-backend.vala")
     allocator_boxed_types = (
         "G_DEFINE_BOXED_TYPE (GumCodeSlice, gum_code_slice, gum_code_slice_ref,\n"
         "                     gum_code_slice_unref)\n"
@@ -840,7 +841,7 @@ def apply_strict_wx_patch(frida_dir: Path) -> None:
             )
         ),
         (
-            Path("subprojects/frida-core/src/linux/frida-helper-backend.vala"),
+            helper_backend,
             "\t\tprivate static uint64 mmap_offset;\n\t\tprivate static uint64 munmap_offset;",
             "\t\tprivate static uint64 mmap_offset;\n"
             "\t\tprivate static uint64 mprotect_offset;\n"
@@ -849,7 +850,7 @@ def apply_strict_wx_patch(frida_dir: Path) -> None:
             "track remote mprotect",
         ),
         (
-            Path("subprojects/frida-core/src/linux/frida-helper-backend.vala"),
+            helper_backend,
             '\t\t\tmmap_offset = (uint64) (uintptr) libc.find_export_by_name ("mmap")'
             " - local_libc.start;\n"
             '\t\t\tmunmap_offset = (uint64) (uintptr) libc.find_export_by_name ("munmap")'
@@ -864,7 +865,7 @@ def apply_strict_wx_patch(frida_dir: Path) -> None:
             "resolve remote mprotect",
         ),
         (
-            Path("subprojects/frida-core/src/linux/frida-helper-backend.vala"),
+            helper_backend,
             "\t\t\tuint64 loader_base = (uintptr) bres.context.allocation_base;\n"
             "\t\t\tGPRegs regs = saved_regs;",
             "\t\t\tuint64 loader_base = (uintptr) bres.context.allocation_base;\n"
@@ -879,7 +880,7 @@ def apply_strict_wx_patch(frida_dir: Path) -> None:
             "loader context is writable but not executable",
         ),
         (
-            Path("subprojects/frida-core/src/linux/frida-helper-backend.vala"),
+            helper_backend,
             "\t\t\tuint64 remote_mmap = 0;\n\t\t\tuint64 remote_munmap = 0;",
             "\t\t\tuint64 remote_mmap = 0;\n"
             "\t\t\tuint64 remote_mprotect = 0;\n"
@@ -888,7 +889,7 @@ def apply_strict_wx_patch(frida_dir: Path) -> None:
             "track target mprotect",
         ),
         (
-            Path("subprojects/frida-core/src/linux/frida-helper-backend.vala"),
+            helper_backend,
             "\t\t\t\tremote_mmap = remote_libc.start + mmap_offset;\n"
             "\t\t\t\tremote_munmap = remote_libc.start + munmap_offset;",
             "\t\t\t\tremote_mmap = remote_libc.start + mmap_offset;\n"
@@ -898,7 +899,7 @@ def apply_strict_wx_patch(frida_dir: Path) -> None:
             "locate target mprotect",
         ),
         (
-            Path("subprojects/frida-core/src/linux/frida-helper-backend.vala"),
+            helper_backend,
             "\t\t\tif (remote_mmap != 0) {\n"
             "\t\t\t\tallocation_base = yield allocate_memory (remote_mmap, allocation_size,\n"
             "\t\t\t\t\tPosix.PROT_READ | Posix.PROT_WRITE | Posix.PROT_EXEC, cancellable);\n"
@@ -928,7 +929,7 @@ def apply_strict_wx_patch(frida_dir: Path) -> None:
             "bootstrap code and stack use disjoint permissions",
         ),
         (
-            Path("subprojects/frida-core/src/linux/frida-helper-backend.vala"),
+            helper_backend,
             "\t\t\t\tbootstrap_ctx.allocation_size = allocation_size;\n"
             "\t\t\t\twrite_memory (bootstrap_ctx_location, (uint8[]) &bootstrap_ctx);",
             "\t\t\t\tbootstrap_ctx.allocation_size = allocation_size;\n"
@@ -938,7 +939,7 @@ def apply_strict_wx_patch(frida_dir: Path) -> None:
             "pass allocation bootstrap stack size",
         ),
         (
-            Path("subprojects/frida-core/src/linux/frida-helper-backend.vala"),
+            helper_backend,
             "\t\t\t\t\tbootstrap_ctx.allocation_size = allocation_size;\n"
             "\t\t\t\t\tbootstrap_ctx.page_size = Gum.query_page_size ();",
             "\t\t\t\t\tbootstrap_ctx.allocation_size = allocation_size;\n"
@@ -948,7 +949,7 @@ def apply_strict_wx_patch(frida_dir: Path) -> None:
             "pass runtime bootstrap stack size",
         ),
         (
-            Path("subprojects/frida-core/src/linux/frida-helper-backend.vala"),
+            helper_backend,
             "\t\tvoid * allocation_base;\n\t\tsize_t allocation_size;\n\n\t\tsize_t page_size;",
             "\t\tvoid * allocation_base;\n"
             "\t\tsize_t allocation_size;\n"
@@ -958,14 +959,14 @@ def apply_strict_wx_patch(frida_dir: Path) -> None:
             "bootstrap context records stack size",
         ),
         (
-            Path("subprojects/frida-core/src/linux/frida-helper-backend.vala"),
+            helper_backend,
             "\t\tvoid * mmap;\n\t\tvoid * munmap;",
             "\t\tvoid * mmap;\n\t\tvoid * mprotect;\n\t\tvoid * munmap;",
             1,
             "bootstrap resolves mprotect",
         ),
         (
-            Path("subprojects/frida-core/src/linux/frida-helper-backend.vala"),
+            helper_backend,
             "\t\tpublic async void deallocate_memory (uint64 munmap_impl, uint64 address, "
             "size_t size, Cancellable? cancellable)",
             "\t\tpublic async void protect_memory (uint64 mprotect_impl, uint64 address, "
@@ -1799,7 +1800,7 @@ Transformations and verification boundaries:
     apply_source_patches(frida_dir, custom_name)
     apply_targeted_patches(frida_dir, custom_name, frida_major)
     if args.strict_wx:
-        apply_strict_wx_patch(frida_dir)
+        apply_strict_wx_patch(frida_dir, custom_name)
 
     # Step 3.5: Extended patches
     if args.extended:
