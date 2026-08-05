@@ -82,7 +82,8 @@ on:
         default: false
 
 permissions:
-  contents: read
+  contents: write
+  actions: write
 
 concurrency:
   group: build-${{ github.workflow }}-${{ github.ref }}
